@@ -1,0 +1,31 @@
+{
+  "baseline": "RideClimbPRO V1 Build 18 uploaded by user",
+  "functional_files_byte_identical_to_build18": {
+    "RideClimbPRO/TrainerManager.swift": true,
+    "RideClimbPRO/RideModel.swift": true,
+    "RideClimbPRO/GPXRoute.swift": true,
+    "RideClimbPRO/RideClimbPROApp.swift": true,
+    "RideClimbPRO/ShareSheet.swift": true
+  },
+  "contentview_control_logic_preserved_from_build18": {
+    "ride.tick(cadenceRPM:)": true,
+    "setTargetResistance(targetResistance)": true,
+    "setVirtualRatio(ride.currentRatio)": true
+  },
+  "gui_changes_only": [
+    "polished Ride dashboard",
+    "GPX import moved to Setup",
+    "larger shifter buttons",
+    "Build number changed to 22"
+  ],
+  "checks": {
+    "legacy_physics_tick_preserved": true,
+    "target_resistance_send_preserved": true,
+    "native_virtual_ratio_preserved": true,
+    "mapping_function_present": true,
+    "smaller_sprocket_harder_math_present": true,
+    "import_gpx_only_once": true,
+    "build22_plist": true,
+    "build22_project_twice": true
+  }
+}

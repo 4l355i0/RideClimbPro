@@ -1,0 +1,33 @@
+workflows:
+  ios-testflight:
+    name: RideClimbPRO TestFlight
+    instance_type: mac_mini_m2
+    max_build_duration: 30
+
+    integrations:
+      app_store_connect: CodeMagic
+
+    environment:
+      xcode: latest
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.alessiosargentini.rideclimbpropro
+
+    scripts:
+      - name: Set up code signing
+        script: |
+          xcode-project use-profiles
+
+      - name: Build IPA
+        script: |
+          set -o pipefail
+          xcode-project build-ipa             --project "RideClimbPRO.xcodeproj" --scheme "RideClimbPRO"
+
+    artifacts:
+      - build/ios/ipa/*.ipa
+
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
+        submit_to_app_store: false
