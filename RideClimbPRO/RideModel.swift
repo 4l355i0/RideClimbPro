@@ -47,6 +47,11 @@ final class RideModel: ObservableObject {
     private var resistanceRampDurationS: Double = 0.6
     private var sessionLog: [SessionSample] = []
 
+    // Build 27: longitudinal bicycle dynamics.
+    // This is the actual route speed state; it is not recomputed directly
+    // from cadence on every tick, so inertia is preserved.
+    private var dynamicSpeedMS: Double = 0
+
     // Terrain response / smoothing retained from the validated V1 control path.
     private let maxGradeLookAheadM: Double = 150.0
     private let minResistanceRampDurationS: Double = 0.6
@@ -240,7 +245,6 @@ final class RideModel: ObservableObject {
             return nil
         }
 
-        // Prefer the actual rate of progress over the last ~30 s.
         if let latest = sessionLog.last {
             let cutoff =
                 latest.elapsedSeconds - 30.0
@@ -271,7 +275,6 @@ final class RideModel: ObservableObject {
             }
         }
 
-        // Initial fallback before enough history exists.
         let speedMS =
             virtualSpeedKPH / 3.6
 
@@ -468,7 +471,6 @@ final class RideModel: ObservableObject {
     }
 
     func shiftRearSmaller() {
-        // Smaller sprocket = harder.
         guard !cassette.isEmpty else {
             return
         }
@@ -481,7 +483,6 @@ final class RideModel: ObservableObject {
     }
 
     func shiftRearLarger() {
-        // Larger sprocket = easier.
         guard !cassette.isEmpty else {
             return
         }
@@ -558,6 +559,7 @@ final class RideModel: ObservableObject {
             currentGearLabel
 
         virtualSpeedKPH = 0
+        dynamicSpeedMS = 0
         targetPowerW = 0
 
         isRiding = false
@@ -589,6 +591,8 @@ final class RideModel: ObservableObject {
     func pauseRide() {
         isRiding = false
         lastTick = nil
+        dynamicSpeedMS = 0
+        virtualSpeedKPH = 0
         status = "Ride paused"
     }
 
@@ -599,6 +603,7 @@ final class RideModel: ObservableObject {
         distanceM = 0
         elapsedSeconds = 0
         virtualSpeedKPH = 0
+        dynamicSpeedMS = 0
         targetPowerW = 0
 
         if let route {
@@ -881,9 +886,100 @@ final class RideModel: ObservableObject {
         )
     }
 
-    /// Advances the route and returns the validated V1 resistance command.
+    // MARK: - Build 27 speed / inertia
+
+    private func integratedSpeedMS(
+        actualPowerW: Int,
+        gradePercent: Double,
+        dt: Double
+    ) -> Double {
+
+        let g = 9.81
+        let mass = max(1.0, totalMassKg)
+        let theta = atan(gradePercent / 100.0)
+        let v = max(0.0, dynamicSpeedMS)
+
+        let wheelPower =
+            max(0.0, Double(actualPowerW)) *
+            max(0.5, drivetrainEfficiency)
+
+        var driveForce: Double = 0
+
+        if wheelPower > 0 {
+            driveForce =
+                wheelPower /
+                max(1.5, v)
+
+            driveForce =
+                min(500.0, driveForce)
+        }
+
+        let gravityForce =
+            mass *
+            g *
+            sin(theta)
+
+        let rollingForce =
+            mass *
+            g *
+            crr *
+            cos(theta)
+
+        let aeroForce =
+            0.5 *
+            airDensity *
+            cda *
+            v *
+            v
+
+        var acceleration =
+            (
+                driveForce -
+                gravityForce -
+                rollingForce -
+                aeroForce
+            ) /
+            mass
+
+        acceleration =
+            min(
+                3.0,
+                max(
+                    -4.0,
+                    acceleration
+                )
+            )
+
+        var next =
+            max(
+                0.0,
+                v + acceleration * dt
+            )
+
+        if next < 0.03 &&
+            gradePercent >= 0 &&
+            actualPowerW <= 0 {
+
+            next = 0
+        }
+
+        next =
+            min(
+                35.0,
+                next
+            )
+
+        dynamicSpeedMS = next
+        return next
+    }
+
+    var drivetrainReferenceSpeedKPH: Double {
+        speedKPH(from: 0)
+    }
+
     func tick(
         cadenceRPM: Double,
+        actualPowerW: Int,
         now: Date = Date()
     ) -> Double? {
 
@@ -918,20 +1014,30 @@ final class RideModel: ObservableObject {
             return targetResistancePercent
         }
 
-        virtualSpeedKPH =
-            speedKPH(
-                from: cadenceRPM
+        let dynamicsGrade =
+            route.forwardGrade(
+                at: distanceM,
+                lookAheadM:
+                    terrainLookAheadM(
+                        for: route
+                    )
             )
+
+        let speedMS =
+            integratedSpeedMS(
+                actualPowerW: actualPowerW,
+                gradePercent: dynamicsGrade,
+                dt: dt
+            )
+
+        virtualSpeedKPH =
+            speedMS * 3.6
 
         distanceM =
             min(
                 route.totalDistanceM,
                 distanceM +
-                (
-                    virtualSpeedKPH /
-                    3.6
-                ) *
-                dt
+                speedMS * dt
             )
 
         elapsedSeconds += dt
@@ -1257,11 +1363,6 @@ final class RideModel: ObservableObject {
 
     // MARK: - FIT activity export
 
-    // Minimal FIT Activity file using standard File ID,
-    // Record, Session and Activity messages.
-    // Ride control and trainer logic are intentionally
-    // not involved in export.
-
     func writeSessionFIT() throws -> URL {
         guard !sessionLog.isEmpty else {
             throw NSError(
@@ -1326,10 +1427,7 @@ final class RideModel: ObservableObject {
                 0x40 | local
             )
 
-            // Reserved.
             data.append(0)
-
-            // Little endian.
             data.append(0)
 
             appendU16(
@@ -1352,8 +1450,6 @@ final class RideModel: ObservableObject {
             _ date: Date
         ) -> UInt32 {
 
-            // FIT epoch:
-            // 1989-12-31 00:00:00 UTC.
             let fitEpoch =
                 Date(
                     timeIntervalSince1970:
@@ -1419,59 +1515,31 @@ final class RideModel: ObservableObject {
             )
         }
 
-        // -------------------------
         // FILE ID
-        // Global message 0
-        // Local message 0
-        // -------------------------
-
         definition(
             local: 0,
             global: 0,
             fields: [
-                FieldDef(
-                    num: 0,
-                    size: 1,
-                    base: 0x00
-                ),
-                FieldDef(
-                    num: 1,
-                    size: 2,
-                    base: 0x84
-                ),
-                FieldDef(
-                    num: 2,
-                    size: 2,
-                    base: 0x84
-                ),
-                FieldDef(
-                    num: 3,
-                    size: 4,
-                    base: 0x86
-                ),
-                FieldDef(
-                    num: 4,
-                    size: 4,
-                    base: 0x86
-                )
+                FieldDef(num: 0, size: 1, base: 0x00),
+                FieldDef(num: 1, size: 2, base: 0x84),
+                FieldDef(num: 2, size: 2, base: 0x84),
+                FieldDef(num: 3, size: 4, base: 0x86),
+                FieldDef(num: 4, size: 4, base: 0x86)
             ]
         )
 
         data.append(0)
 
-        // File type: activity.
         appendU8(
             4,
             to: &data
         )
 
-        // Development manufacturer.
         appendU16(
             255,
             to: &data
         )
 
-        // RideClimbPRO product.
         appendU16(
             1,
             to: &data
@@ -1489,58 +1557,24 @@ final class RideModel: ObservableObject {
             to: &data
         )
 
-        // -------------------------
         // RECORD
-        // Global message 20
-        // Local message 1
-        // -------------------------
-
         definition(
             local: 1,
             global: 20,
             fields: [
-                FieldDef(
-                    num: 253,
-                    size: 4,
-                    base: 0x86
-                ),
-                FieldDef(
-                    num: 2,
-                    size: 2,
-                    base: 0x84
-                ),
-                FieldDef(
-                    num: 3,
-                    size: 1,
-                    base: 0x02
-                ),
-                FieldDef(
-                    num: 4,
-                    size: 1,
-                    base: 0x02
-                ),
-                FieldDef(
-                    num: 5,
-                    size: 4,
-                    base: 0x86
-                ),
-                FieldDef(
-                    num: 6,
-                    size: 2,
-                    base: 0x84
-                ),
-                FieldDef(
-                    num: 7,
-                    size: 2,
-                    base: 0x84
-                )
+                FieldDef(num: 253, size: 4, base: 0x86),
+                FieldDef(num: 2, size: 2, base: 0x84),
+                FieldDef(num: 3, size: 1, base: 0x02),
+                FieldDef(num: 4, size: 1, base: 0x02),
+                FieldDef(num: 5, size: 4, base: 0x86),
+                FieldDef(num: 6, size: 2, base: 0x84),
+                FieldDef(num: 7, size: 2, base: 0x84)
             ]
         )
 
         for sample in sessionLog {
             data.append(1)
 
-            // Timestamp.
             appendU32(
                 fitTimestamp(
                     sample.timestamp
@@ -1548,8 +1582,6 @@ final class RideModel: ObservableObject {
                 to: &data
             )
 
-            // Altitude.
-            // FIT scale 5, offset 500.
             appendU16(
                 clampU16(
                     (
@@ -1561,7 +1593,6 @@ final class RideModel: ObservableObject {
                 to: &data
             )
 
-            // Heart rate.
             appendU8(
                 clampU8(
                     Double(
@@ -1571,7 +1602,6 @@ final class RideModel: ObservableObject {
                 to: &data
             )
 
-            // Cadence.
             appendU8(
                 clampU8(
                     sample.cadenceRPM
@@ -1579,8 +1609,6 @@ final class RideModel: ObservableObject {
                 to: &data
             )
 
-            // Distance:
-            // FIT scale 100.
             appendU32(
                 clampU32(
                     sample.distanceM *
@@ -1589,8 +1617,6 @@ final class RideModel: ObservableObject {
                 to: &data
             )
 
-            // Speed:
-            // m/s scale 1000.
             appendU16(
                 clampU16(
                     (
@@ -1602,7 +1628,6 @@ final class RideModel: ObservableObject {
                 to: &data
             )
 
-            // Power.
             appendU16(
                 clampU16(
                     Double(
@@ -1695,86 +1720,25 @@ final class RideModel: ObservableObject {
         let maxPower =
             powerValues.max() ?? 0
 
-        // -------------------------
         // SESSION
-        // Global message 18
-        // Local message 2
-        // -------------------------
-
         definition(
             local: 2,
             global: 18,
             fields: [
-                FieldDef(
-                    num: 253,
-                    size: 4,
-                    base: 0x86
-                ),
-                FieldDef(
-                    num: 2,
-                    size: 4,
-                    base: 0x86
-                ),
-                FieldDef(
-                    num: 5,
-                    size: 1,
-                    base: 0x00
-                ),
-                FieldDef(
-                    num: 6,
-                    size: 1,
-                    base: 0x00
-                ),
-                FieldDef(
-                    num: 7,
-                    size: 4,
-                    base: 0x86
-                ),
-                FieldDef(
-                    num: 8,
-                    size: 4,
-                    base: 0x86
-                ),
-                FieldDef(
-                    num: 9,
-                    size: 4,
-                    base: 0x86
-                ),
-                FieldDef(
-                    num: 14,
-                    size: 2,
-                    base: 0x84
-                ),
-                FieldDef(
-                    num: 16,
-                    size: 1,
-                    base: 0x02
-                ),
-                FieldDef(
-                    num: 17,
-                    size: 1,
-                    base: 0x02
-                ),
-                FieldDef(
-                    num: 18,
-                    size: 1,
-                    base: 0x02
-                ),
-                FieldDef(
-                    num: 19,
-                    size: 1,
-                    base: 0x02
-                ),
-                FieldDef(
-                    num: 20,
-                    size: 2,
-                    base: 0x84
-                ),
-                FieldDef(
-                    num: 21,
-                    size: 2,
-                    base: 0x84
-                )
+                FieldDef(num: 253, size: 4, base: 0x86),
+                FieldDef(num: 2, size: 4, base: 0x86),
+                FieldDef(num: 5, size: 1, base: 0x00),
+                FieldDef(num: 6, size: 1, base: 0x00),
+                FieldDef(num: 7, size: 4, base: 0x86),
+                FieldDef(num: 8, size: 4, base: 0x86),
+                FieldDef(num: 9, size: 4, base: 0x86),
+                FieldDef(num: 14, size: 2, base: 0x84),
+                FieldDef(num: 16, size: 1, base: 0x02),
+                FieldDef(num: 17, size: 1, base: 0x02),
+                FieldDef(num: 18, size: 1, base: 0x02),
+                FieldDef(num: 19, size: 1, base: 0x02),
+                FieldDef(num: 20, size: 2, base: 0x84),
+                FieldDef(num: 21, size: 2, base: 0x84)
             ]
         )
 
@@ -1794,13 +1758,11 @@ final class RideModel: ObservableObject {
             to: &data
         )
 
-        // Sport: cycling.
         appendU8(
             2,
             to: &data
         )
 
-        // Sub-sport: generic.
         appendU8(
             0,
             to: &data
@@ -1880,46 +1842,17 @@ final class RideModel: ObservableObject {
             to: &data
         )
 
-        // -------------------------
         // ACTIVITY
-        // Global message 34
-        // Local message 3
-        // -------------------------
-
         definition(
             local: 3,
             global: 34,
             fields: [
-                FieldDef(
-                    num: 253,
-                    size: 4,
-                    base: 0x86
-                ),
-                FieldDef(
-                    num: 0,
-                    size: 4,
-                    base: 0x86
-                ),
-                FieldDef(
-                    num: 1,
-                    size: 2,
-                    base: 0x84
-                ),
-                FieldDef(
-                    num: 2,
-                    size: 1,
-                    base: 0x00
-                ),
-                FieldDef(
-                    num: 3,
-                    size: 1,
-                    base: 0x00
-                ),
-                FieldDef(
-                    num: 4,
-                    size: 1,
-                    base: 0x00
-                )
+                FieldDef(num: 253, size: 4, base: 0x86),
+                FieldDef(num: 0, size: 4, base: 0x86),
+                FieldDef(num: 1, size: 2, base: 0x84),
+                FieldDef(num: 2, size: 1, base: 0x00),
+                FieldDef(num: 3, size: 1, base: 0x00),
+                FieldDef(num: 4, size: 1, base: 0x00)
             ]
         )
 
@@ -1945,28 +1878,22 @@ final class RideModel: ObservableObject {
             to: &data
         )
 
-        // Timer trigger: manual.
         appendU8(
             0,
             to: &data
         )
 
-        // Event: activity.
         appendU8(
             26,
             to: &data
         )
 
-        // Event type: stop.
         appendU8(
             1,
             to: &data
         )
 
-        // -------------------------
         // FIT CRC
-        // -------------------------
-
         func crc16(
             _ bytes: Data,
             initial: UInt16 = 0
@@ -2035,16 +1962,9 @@ final class RideModel: ObservableObject {
             return crc
         }
 
-        // -------------------------
-        // FIT HEADER
-        // -------------------------
-
         var header = Data()
 
-        // 14-byte header.
         header.append(14)
-
-        // FIT protocol 2.0.
         header.append(0x20)
 
         appendU16(
@@ -2057,7 +1977,6 @@ final class RideModel: ObservableObject {
             to: &header
         )
 
-        // ".FIT"
         header.append(
             contentsOf: [
                 0x2E,
