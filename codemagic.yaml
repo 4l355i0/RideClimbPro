@@ -11,7 +11,7 @@ workflows:
       xcode: latest
       ios_signing:
         distribution_type: app_store
-        bundle_identifier: com.alessiosargentini.rideclimbpropro
+        bundle_identifier: com.alessiosargentini.rideclimbpro
 
     scripts:
       - name: Set up code signing
