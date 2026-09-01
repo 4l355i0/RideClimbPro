@@ -40,14 +40,12 @@ struct ContentView: View {
         .onReceive(timer) { now in
             guard trainer.controlReady else { return }
 
-            // Build 29 deliberately restores the validated RideClimb Build 25
-            // ride engine. Do not feed power into route speed here: cadence +
-            // the native virtual ratio remain the single source for RideModel
-            // speed/distance, including REAL (neutral 1.00x virtual shift).
-            // Advance the validated ride engine for cadence/virtual-speed/distance.
-            // Trainer control is intentionally simple: GPX grade + native virtual gear.
+            // Preserve the validated cadence + virtual-gear ride engine while pedalling.
+            // Trainer speed is supplied only as a downhill coasting source when cadence is zero.
+            // Trainer control is intentionally simple: current GPX grade + native virtual gear.
             _ = ride.tick(
                 cadenceRPM: trainer.cadenceRPM,
+                trainerSpeedKPH: trainer.speedKPH,
                 now: now
             )
 
