@@ -10,6 +10,11 @@ struct Climb3DMeshBuilder {
     let baseHeightM: Double = 8.0
     let centerlineLiftM: Double = 0.10
 
+    // Build 29: visual-only elevation filtering. The RideModel route and all
+    // trainer/virtual-shift calculations remain exactly the validated Build 25
+    // path. Only the rendered Z profile is filtered.
+    let visualElevationSmoothRadiusM: Double = 28.0
+
     private struct ProjectedPoint {
         let distanceM: Double
         let x: Double
@@ -29,13 +34,20 @@ struct Climb3DMeshBuilder {
         let first = route.points[0]
         let latScale = 111_320.0
         let lonScale = 111_320.0 * cos(first.latitude * .pi / 180)
-        let minElevation = route.points.map(\.elevationM).min() ?? 0
+        let visualElevations = smoothedVisualElevations(
+            route.points,
+            radiusM: visualElevationSmoothRadiusM
+        )
+        let minElevation = visualElevations.min() ?? 0
 
-        let allPoints: [ProjectedPoint] = route.points.map { point in
+        // X/Z (map geometry) are never smoothed. This is critical on tight
+        // hairpins: the road follows the actual GPX polyline instead of cutting
+        // across neighbouring legs. Only elevation is filtered for rendering.
+        let allPoints: [ProjectedPoint] = route.points.enumerated().map { index, point in
             ProjectedPoint(
                 distanceM: point.distanceM,
                 x: (point.longitude - first.longitude) * lonScale,
-                y: (point.elevationM - minElevation) * verticalExaggeration,
+                y: (visualElevations[index] - minElevation) * verticalExaggeration,
                 z: -(point.latitude - first.latitude) * latScale
             )
         }
@@ -142,51 +154,83 @@ struct Climb3DMeshBuilder {
         )
     }
 
+    /// Preserve the GPX plan-view geometry. Earlier builds attempted to remove
+    /// "reversals" and could delete a genuine point at a hairpin, producing a
+    /// chord through the bend. Build 29 removes only true/near duplicates.
     private func prepareMeshPath(_ source: [ProjectedPoint]) -> [ProjectedPoint] {
         guard source.count >= 2 else { return source }
 
-        let minimumDistanceM = 1.5
-        var filtered: [ProjectedPoint] = [source[0]]
+        let minimumDistanceM = 0.25
+        var filtered: [ProjectedPoint] = []
+        filtered.reserveCapacity(source.count)
+        filtered.append(source[0])
 
-        for point in source.dropFirst().dropLast() {
-            if let last = filtered.last,
-               horizontalDistance(last, point) >= minimumDistanceM {
+        for point in source.dropFirst() {
+            guard let last = filtered.last else {
+                filtered.append(point)
+                continue
+            }
+
+            if horizontalDistance(last, point) >= minimumDistanceM {
                 filtered.append(point)
             }
         }
 
-        if let last = source.last {
-            if filtered.count == 1 ||
-                horizontalDistance(filtered[filtered.count - 1], last) > 0.01 {
-                filtered.append(last)
-            }
+        // Always retain the true GPX endpoint even when it is very close to the
+        // previous sample.
+        if let sourceLast = source.last,
+           let filteredLast = filtered.last,
+           sourceLast.distanceM > filteredLast.distanceM,
+           horizontalDistance(filteredLast, sourceLast) > 0.01 {
+            filtered.append(sourceLast)
         }
 
-        guard filtered.count >= 4 else { return filtered }
+        return filtered.count >= 2 ? filtered : source
+    }
 
-        var result: [ProjectedPoint] = []
-        var i = 0
+    /// Triangular, distance-domain smoothing used only for 3D elevation.
+    /// Latitude/longitude and RideModel's elevations are intentionally untouched.
+    private func smoothedVisualElevations(
+        _ points: [RoutePoint],
+        radiusM: Double
+    ) -> [Double] {
+        guard points.count >= 3, radiusM > 0 else {
+            return points.map(\.elevationM)
+        }
 
-        while i < filtered.count {
-            if i > 0 && i < filtered.count - 2 {
-                let a0 = segmentAngle(filtered[i-1], filtered[i])
-                let a1 = segmentAngle(filtered[i], filtered[i+1])
-                let a2 = segmentAngle(filtered[i+1], filtered[i+2])
+        var result = Array(repeating: 0.0, count: points.count)
+        var left = 0
+        var right = 0
 
-                let t1 = normalizedAngle(a1 - a0)
-                let t2 = normalizedAngle(a2 - a1)
+        for i in points.indices {
+            let center = points[i].distanceM
 
-                if abs(t1) > .pi / 2 && abs(t2) > .pi / 2 {
-                    i += 1
-                    continue
+            while left < i && center - points[left].distanceM > radiusM {
+                left += 1
+            }
+
+            if right < i { right = i }
+            while right + 1 < points.count &&
+                    points[right + 1].distanceM - center <= radiusM {
+                right += 1
+            }
+
+            var weighted = 0.0
+            var weightSum = 0.0
+
+            if left <= right {
+                for j in left...right {
+                    let delta = abs(points[j].distanceM - center)
+                    let weight = max(0.001, 1.0 - delta / radiusM)
+                    weighted += points[j].elevationM * weight
+                    weightSum += weight
                 }
             }
 
-            result.append(filtered[i])
-            i += 1
+            result[i] = weightSum > 0 ? weighted / weightSum : points[i].elevationM
         }
 
-        return result.count >= 2 ? result : filtered
+        return result
     }
 
     private func buildBufferedEdges(
