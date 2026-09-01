@@ -8,7 +8,7 @@ struct ContentView: View {
     @StateObject private var climb3D = RideClimbPRO3DModel()
 
     @State private var showImporter = false
-    @State private var lastSentResistance: Double?
+    @State private var lastSentGrade: Double?
     @State private var exportURL: URL?
     @State private var showShareSheet = false
     @State private var lastLogSampleAt: Date?
@@ -44,16 +44,19 @@ struct ContentView: View {
             // ride engine. Do not feed power into route speed here: cadence +
             // the native virtual ratio remain the single source for RideModel
             // speed/distance, including REAL (neutral 1.00x virtual shift).
-            if let targetResistance = ride.tick(
+            // Advance the validated ride engine for cadence/virtual-speed/distance.
+            // Trainer control is intentionally simple: GPX grade + native virtual gear.
+            _ = ride.tick(
                 cadenceRPM: trainer.cadenceRPM,
                 now: now
-            ) {
-                if lastSentResistance == nil ||
-                    abs(targetResistance - (lastSentResistance ?? 0)) >= 0.5 {
+            )
 
-                    trainer.setTargetResistance(targetResistance)
-                    lastSentResistance = targetResistance
-                }
+            let grade = ride.currentGradePercent
+            if lastSentGrade == nil ||
+                abs(grade - (lastSentGrade ?? 0)) >= 0.1 {
+
+                trainer.setGrade(grade)
+                lastSentGrade = grade
             }
 
             if trainer.nativeVirtualShiftReady &&
@@ -101,7 +104,7 @@ struct ContentView: View {
                 do {
                     try ride.loadGPX(url: url)
                     try climb3D.load(route: ride.route)
-                    lastSentResistance = nil
+                    lastSentGrade = nil
                 } catch {
                     ride.status = "GPX error: \(error.localizedDescription)"
                 }
@@ -366,7 +369,7 @@ struct ContentView: View {
 
                         Button {
                             ride.resetSession()
-                            lastSentResistance = nil
+                            lastSentGrade = nil
                         } label: {
                             Label(
                                 "Reset",
@@ -1325,7 +1328,7 @@ struct ContentView: View {
     }
 
     private func syncNativeGear() {
-        lastSentResistance = nil
+        lastSentGrade = nil
 
         guard trainer
             .nativeVirtualShiftReady
@@ -1343,7 +1346,7 @@ struct ContentView: View {
     }
 
     private func setRealDrivetrainNeutral() {
-        lastSentResistance = nil
+        lastSentGrade = nil
 
         guard trainer
             .nativeVirtualShiftReady
