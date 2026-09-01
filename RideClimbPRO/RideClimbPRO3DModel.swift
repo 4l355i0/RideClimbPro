@@ -27,6 +27,10 @@ final class RideClimbPRO3DModel: ObservableObject {
         )
     }
 
+    func showOverview() {
+        sceneController.showOverview()
+    }
+
     func resetCamera() {
         sceneController.resetCamera()
     }
