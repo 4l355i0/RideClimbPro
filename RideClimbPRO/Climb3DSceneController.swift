@@ -18,24 +18,22 @@ final class Climb3DSceneController {
 
     private var mesh: Climb3DMesh?
     private var route: GPXRoute?
-
     private var currentDistanceM: Double = 0
     private var followMode = false
-    private var showingOverview = true
+    private var overviewMode = true
 
-    // Follow camera: rider remains in the lower/central part of the frame,
-    // while the camera looks well ahead to preserve road perspective.
-    private let cameraBehindM: Double = 11
+    // Build 29 camera constants. These affect rendering only.
+    private let cameraBehindM: Double = 10
     private let cameraHeightM: Float = 5.2
-    private let followLookAheadM: Double = 24
-    private let followTargetLiftM: Float = 0.7
+    private let tangentHalfWindowM: Double = 4.0
+    private let followLookAheadM: Double = 11.0
 
     init() {
-        let markerGeometry = SCNSphere(radius: 0.52)
-        markerGeometry.segmentCount = 24
+        let markerGeometry = SCNSphere(radius: 0.72)
+        markerGeometry.segmentCount = 28
         markerGeometry.firstMaterial?.diffuse.contents = UIColor.systemRed
         markerGeometry.firstMaterial?.emission.contents =
-            UIColor.systemRed.withAlphaComponent(0.28)
+            UIColor.systemRed.withAlphaComponent(0.24)
         markerGeometry.firstMaterial?.lightingModel = .physicallyBased
 
         markerNode = SCNNode(geometry: markerGeometry)
@@ -46,7 +44,7 @@ final class Climb3DSceneController {
         scene.rootNode.addChildNode(markerNode)
 
         let camera = SCNCamera()
-        camera.fieldOfView = 66
+        camera.fieldOfView = 62
         camera.zNear = 0.12
         camera.zFar = 50_000
         camera.automaticallyAdjustsZRange = true
@@ -60,15 +58,13 @@ final class Climb3DSceneController {
         keyLightNode.light?.castsShadow = true
         keyLightNode.light?.shadowRadius = 4
         keyLightNode.light?.shadowSampleCount = 12
-        keyLightNode.eulerAngles =
-            SCNVector3(-Float.pi/3, Float.pi/4, 0)
+        keyLightNode.eulerAngles = SCNVector3(-Float.pi / 3, Float.pi / 4, 0)
         scene.rootNode.addChildNode(keyLightNode)
 
         fillLightNode.light = SCNLight()
         fillLightNode.light?.type = .directional
         fillLightNode.light?.intensity = 390
-        fillLightNode.eulerAngles =
-            SCNVector3(-Float.pi/4, -Float.pi/2, 0)
+        fillLightNode.eulerAngles = SCNVector3(-Float.pi / 4, -Float.pi / 2, 0)
         scene.rootNode.addChildNode(fillLightNode)
 
         ambientNode.light = SCNLight()
@@ -78,22 +74,18 @@ final class Climb3DSceneController {
         scene.rootNode.addChildNode(ambientNode)
 
         scene.background.contents =
-            UIColor(red: 0.55, green: 0.69, blue: 0.80, alpha: 1)
+            UIColor(red: 0.42, green: 0.51, blue: 0.58, alpha: 1)
     }
 
     func attach(to view: SCNView) {
         self.view = view
         view.pointOfView = cameraNode
 
-        if mesh != nil {
-            if showingOverview {
-                showOverview(animated: false)
-            } else if followMode {
-                updateFollowCamera(
-                    distanceM: currentDistanceM,
-                    animated: false
-                )
-            }
+        guard mesh != nil else { return }
+        if overviewMode {
+            showOverview(animated: false)
+        } else if followMode {
+            updateFollowCamera(distanceM: currentDistanceM, animated: false)
         }
     }
 
@@ -103,253 +95,122 @@ final class Climb3DSceneController {
 
         meshNode.geometry = mesh.sceneGeometry()
         meshNode.castsShadow = false
-
         rebuildRoute(mesh.centerline)
 
         currentDistanceM = 0
         followMode = false
-        showingOverview = true
+        overviewMode = true
         updateMarker(distanceM: 0, animated: false)
         showOverview(animated: false)
     }
 
-    /// RideClimbPRO is the source of truth. No independent progress clock exists here.
+    /// The only position input is RideModel.distanceM. There is no second 3D
+    /// clock, speed integrator or cadence calculation in the SceneKit layer.
     func updateDistance(_ distanceM: Double) {
         guard let route, route.totalDistanceM > 0 else {
             markerNode.isHidden = true
             return
         }
 
-        let previousDistance = currentDistanceM
-        let distance =
-            min(
-                route.totalDistanceM,
-                max(0, distanceM)
-            )
-
+        let distance = min(route.totalDistanceM, max(0, distanceM))
         currentDistanceM = distance
+        updateMarker(distanceM: distance, animated: true)
 
-        updateMarker(
-            distanceM: distance,
-            animated: true
-        )
-
-        // A freshly imported/reset GPX is shown as a full-route perspective
-        // overview. As soon as RideModel actually starts advancing, switch to
-        // the riding camera automatically.
-        if showingOverview {
-            if distance > 0.05 &&
-                distance > previousDistance {
-
-                showingOverview = false
-                followMode = true
-
-                updateFollowCamera(
-                    distanceM: distance,
-                    animated: true
-                )
-            }
-
-            return
-        }
-
+        // Overview remains an overview while riding: the marker therefore moves
+        // visibly along the whole climb. Follow starts only when the user taps
+        // Follow; we do not silently change camera mode.
         if followMode {
-            updateFollowCamera(
-                distanceM: distance,
-                animated: true
-            )
+            updateFollowCamera(distanceM: distance, animated: true)
         }
     }
 
-    private func updateMarker(
-        distanceM: Double,
-        animated: Bool
-    ) {
-        let position =
-            meshPosition(
-                atDistanceM: distanceM
-            )
-
-        let markerTarget =
-            SCNVector3(
-                position.x,
-                position.y + 0.50,
-                position.z
-            )
-
+    private func updateMarker(distanceM: Double, animated: Bool) {
+        let position = meshPosition(atDistanceM: distanceM)
+        let target = SCNVector3(position.x, position.y + 0.72, position.z)
         markerNode.isHidden = false
 
         if animated {
             SCNTransaction.begin()
-            SCNTransaction.animationDuration = 0.24
-            SCNTransaction.animationTimingFunction =
-                CAMediaTimingFunction(name: .linear)
-
-            markerNode.position = markerTarget
-
+            SCNTransaction.animationDuration = 0.18
+            SCNTransaction.animationTimingFunction = CAMediaTimingFunction(name: .linear)
+            markerNode.position = target
             SCNTransaction.commit()
         } else {
-            markerNode.position = markerTarget
+            markerNode.position = target
         }
     }
 
-    private func updateFollowCamera(
-        distanceM: Double,
-        animated: Bool
-    ) {
-        guard let route,
-              route.totalDistanceM > 0 else {
-            return
+    private func updateFollowCamera(distanceM: Double, animated: Bool) {
+        guard let route, route.totalDistanceM > 0 else { return }
+
+        let current = meshPosition(atDistanceM: distanceM)
+        let before = meshPosition(
+            atDistanceM: max(0, distanceM - tangentHalfWindowM)
+        )
+        let after = meshPosition(
+            atDistanceM: min(route.totalDistanceM, distanceM + tangentHalfWindowM)
+        )
+
+        var dx = Double(after.x - before.x)
+        var dz = Double(after.z - before.z)
+        var length = sqrt(dx * dx + dz * dz)
+
+        if length < 0.01 {
+            let future = meshPosition(
+                atDistanceM: min(route.totalDistanceM, distanceM + followLookAheadM)
+            )
+            dx = Double(future.x - current.x)
+            dz = Double(future.z - current.z)
+            length = max(0.01, sqrt(dx * dx + dz * dz))
         }
 
-        let current =
-            meshPosition(
-                atDistanceM: distanceM
-            )
+        let ux = Float(dx / length)
+        let uz = Float(dz / length)
 
-        let futureDistance =
-            min(
-                route.totalDistanceM,
-                distanceM + followLookAheadM
-            )
+        // Stay behind the rider along the LOCAL tangent. We deliberately do not
+        // use a previous route point as the camera position: at a hairpin that
+        // point can lie on the other leg and make the camera cut through it.
+        let cameraPosition = SCNVector3(
+            current.x - ux * Float(cameraBehindM),
+            current.y + cameraHeightM,
+            current.z - uz * Float(cameraBehindM)
+        )
 
-        let future =
-            meshPosition(
-                atDistanceM: futureDistance
-            )
-
-        // Use the local forward tangent, rather than a point on the road
-        // behind the rider. At a tight hairpin an actual "behind" route point
-        // can lie on the previous leg and make the camera flip or lose
-        // perspective.
-        var dx =
-            Double(
-                future.x - current.x
-            )
-
-        var dz =
-            Double(
-                future.z - current.z
-            )
-
-        var horizontalLength =
-            sqrt(
-                dx * dx +
-                dz * dz
-            )
-
-        // Very end of route: derive direction from a point behind.
-        if horizontalLength < 0.01 {
-            let back =
-                meshPosition(
-                    atDistanceM:
-                        max(
-                            0,
-                            distanceM - followLookAheadM
-                        )
-                )
-
-            dx =
-                Double(
-                    current.x - back.x
-                )
-
-            dz =
-                Double(
-                    current.z - back.z
-                )
-
-            horizontalLength =
-                max(
-                    0.01,
-                    sqrt(
-                        dx * dx +
-                        dz * dz
-                    )
-                )
-        }
-
-        let ux =
-            Float(
-                dx /
-                horizontalLength
-            )
-
-        let uz =
-            Float(
-                dz /
-                horizontalLength
-            )
-
-        // Camera stays behind and above the rider. Because it looks 24 m
-        // ahead instead of directly at the ball, the climb and upcoming
-        // hairpins retain clear depth/perspective.
-        let cameraPosition =
-            SCNVector3(
-                current.x -
-                    ux *
-                    Float(cameraBehindM),
-                current.y +
-                    cameraHeightM,
-                current.z -
-                    uz *
-                    Float(cameraBehindM)
-            )
-
-        let target =
-            SCNVector3(
-                future.x,
-                future.y +
-                    followTargetLiftM,
-                future.z
-            )
+        let future = meshPosition(
+            atDistanceM: min(route.totalDistanceM, distanceM + followLookAheadM)
+        )
+        let target = SCNVector3(future.x, future.y + 0.55, future.z)
 
         let apply = {
-            self.cameraNode.position =
-                cameraPosition
-
+            self.cameraNode.camera?.fieldOfView = 66
+            self.cameraNode.position = cameraPosition
             self.cameraNode.look(
                 at: target,
-                up:
-                    SCNVector3(
-                        0,
-                        1,
-                        0
-                    ),
-                localFront:
-                    SCNVector3(
-                        0,
-                        0,
-                        -1
-                    )
+                up: SCNVector3(0, 1, 0),
+                localFront: SCNVector3(0, 0, -1)
             )
-
-            self.view?.pointOfView =
-                self.cameraNode
+            self.view?.pointOfView = self.cameraNode
         }
 
         if animated {
             SCNTransaction.begin()
-            SCNTransaction.animationDuration = 0.24
-            SCNTransaction.animationTimingFunction =
-                CAMediaTimingFunction(name: .linear)
-
+            SCNTransaction.animationDuration = 0.18
+            SCNTransaction.animationTimingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             apply()
-
             SCNTransaction.commit()
         } else {
             apply()
         }
     }
 
-    /// Full-climb perspective shown after GPX import and after a reset.
+    /// Full-route overview with a sphere-fit camera. Unlike the previous
+    /// diagonal-span heuristic, a bounding sphere plus the actual view aspect
+    /// guarantees margin around long/narrow routes and vertically exaggerated
+    /// climbs, so the GPX cannot be cropped at the screen edges.
     func showOverview(animated: Bool = true) {
-        guard let mesh,
-              !mesh.centerline.isEmpty else {
-            return
-        }
+        guard let mesh, !mesh.centerline.isEmpty else { return }
 
-        showingOverview = true
+        overviewMode = true
         followMode = false
 
         var minX = Float.greatestFiniteMagnitude
@@ -360,108 +221,66 @@ final class Climb3DSceneController {
         var maxZ = -Float.greatestFiniteMagnitude
 
         for p in mesh.centerline {
-            minX = min(minX, p.x)
-            maxX = max(maxX, p.x)
-            minY = min(minY, p.y)
-            maxY = max(maxY, p.y)
-            minZ = min(minZ, p.z)
-            maxZ = max(maxZ, p.z)
+            minX = min(minX, p.x); maxX = max(maxX, p.x)
+            minY = min(minY, p.y); maxY = max(maxY, p.y)
+            minZ = min(minZ, p.z); maxZ = max(maxZ, p.z)
         }
 
-        let center =
-            SCNVector3(
-                (minX + maxX) / 2,
-                (minY + maxY) / 2,
-                (minZ + maxZ) / 2
-            )
+        let center = SCNVector3(
+            (minX + maxX) / 2,
+            (minY + maxY) / 2,
+            (minZ + maxZ) / 2
+        )
 
-        let spanX =
-            Double(maxX - minX)
+        var radius: Float = 1
+        for p in mesh.centerline {
+            let dx = p.x - center.x
+            let dy = p.y - center.y
+            let dz = p.z - center.z
+            radius = max(radius, sqrt(dx * dx + dy * dy + dz * dz))
+        }
 
-        let spanZ =
-            Double(maxZ - minZ)
+        let aspect: Double = {
+            guard let view, view.bounds.height > 1 else { return 0.55 }
+            return max(0.35, Double(view.bounds.width / view.bounds.height))
+        }()
 
-        let spanY =
-            Double(maxY - minY)
+        let verticalFOVDegrees = 54.0
+        let verticalHalf = verticalFOVDegrees * .pi / 360.0
+        let horizontalHalf = atan(tan(verticalHalf) * aspect)
+        let limitingHalfFOV = max(0.12, min(verticalHalf, horizontalHalf))
+        let fitDistance = Double(radius) / sin(limitingHalfFOV) * 1.18
 
-        let horizontalSpan =
-            max(
-                20.0,
-                sqrt(
-                    spanX * spanX +
-                    spanZ * spanZ
-                )
-            )
+        // Oblique "miniature climb" view: enough height to read elevation, but
+        // enough lateral offset to keep hairpins visibly separated.
+        let vx = -0.58
+        let vy = 0.72
+        let vz = 0.58
+        let norm = sqrt(vx * vx + vy * vy + vz * vz)
+        let d = Float(fitDistance)
 
-        // Distance derived from route footprint so short and long climbs both
-        // fit. Extra height gives the desired "model from afar" perspective.
-        let distance =
-            Float(
-                max(
-                    35.0,
-                    horizontalSpan * 0.90
-                )
-            )
-
-        let height =
-            Float(
-                max(
-                    18.0,
-                    horizontalSpan * 0.42 +
-                    spanY * 0.55
-                )
-            )
-
-        let cameraPosition =
-            SCNVector3(
-                center.x -
-                    distance * 0.72,
-                center.y +
-                    height,
-                center.z +
-                    distance * 0.72
-            )
-
-        let target =
-            SCNVector3(
-                center.x,
-                center.y +
-                    Float(spanY * 0.08),
-                center.z
-            )
+        let cameraPosition = SCNVector3(
+            center.x + Float(vx / norm) * d,
+            center.y + Float(vy / norm) * d,
+            center.z + Float(vz / norm) * d
+        )
 
         let apply = {
-            self.cameraNode.position =
-                cameraPosition
-
+            self.cameraNode.camera?.fieldOfView = CGFloat(verticalFOVDegrees)
+            self.cameraNode.position = cameraPosition
             self.cameraNode.look(
-                at: target,
-                up:
-                    SCNVector3(
-                        0,
-                        1,
-                        0
-                    ),
-                localFront:
-                    SCNVector3(
-                        0,
-                        0,
-                        -1
-                    )
+                at: center,
+                up: SCNVector3(0, 1, 0),
+                localFront: SCNVector3(0, 0, -1)
             )
-
-            self.view?.pointOfView =
-                self.cameraNode
+            self.view?.pointOfView = self.cameraNode
         }
 
         if animated {
             SCNTransaction.begin()
-            SCNTransaction.animationDuration = 0.65
-            SCNTransaction.animationTimingFunction =
-                CAMediaTimingFunction(name: .easeInEaseOut)
-
+            SCNTransaction.animationDuration = 0.45
+            SCNTransaction.animationTimingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             apply()
-
             SCNTransaction.commit()
         } else {
             apply()
@@ -473,13 +292,9 @@ final class Climb3DSceneController {
     }
 
     func enableFollowMode() {
-        showingOverview = false
+        overviewMode = false
         followMode = true
-
-        updateFollowCamera(
-            distanceM: currentDistanceM,
-            animated: true
-        )
+        updateFollowCamera(distanceM: currentDistanceM, animated: true)
     }
 
     func resetCamera() {
@@ -495,36 +310,29 @@ final class Climb3DSceneController {
         }
 
         let target = min(route.totalDistanceM, max(0, distanceM))
-
         if target <= 0 { return mesh.centerline[0] }
-        if target >= route.totalDistanceM {
-            return mesh.centerline[mesh.centerline.count - 1]
-        }
+        if target >= route.totalDistanceM { return mesh.centerline[mesh.centerline.count - 1] }
 
         var low = 0
         var high = min(route.points.count, mesh.centerline.count) - 1
 
         while low + 1 < high {
             let mid = (low + high) / 2
-            if route.points[mid].distanceM < target {
-                low = mid
-            } else {
-                high = mid
-            }
+            if route.points[mid].distanceM < target { low = mid }
+            else { high = mid }
         }
 
         let ra = route.points[low]
         let rb = route.points[high]
         let a = mesh.centerline[low]
         let b = mesh.centerline[high]
-
         let span = max(0.001, rb.distanceM - ra.distanceM)
         let t = Float((target - ra.distanceM) / span)
 
         return Climb3DVertex(
-            x: a.x + (b.x-a.x)*t,
-            y: a.y + (b.y-a.y)*t,
-            z: a.z + (b.z-a.z)*t
+            x: a.x + (b.x - a.x) * t,
+            y: a.y + (b.y - a.y) * t,
+            z: a.z + (b.z - a.z) * t
         )
     }
 
@@ -533,43 +341,40 @@ final class Climb3DSceneController {
         guard points.count >= 2 else { return }
 
         for i in 1..<points.count {
-            let a = points[i-1]
+            let a = points[i - 1]
             let b = points[i]
             routeNode.addChildNode(
                 lineNode(
-                    from: SCNVector3(a.x, a.y+0.08, a.z),
-                    to: SCNVector3(b.x, b.y+0.08, b.z)
+                    from: SCNVector3(a.x, a.y + 0.08, a.z),
+                    to: SCNVector3(b.x, b.y + 0.08, b.z)
                 )
             )
         }
     }
 
     private func lineNode(from a: SCNVector3, to b: SCNVector3) -> SCNNode {
-        let dx = b.x-a.x
-        let dy = b.y-a.y
-        let dz = b.z-a.z
-        let length = sqrt(dx*dx + dy*dy + dz*dz)
+        let dx = b.x - a.x
+        let dy = b.y - a.y
+        let dz = b.z - a.z
+        let length = sqrt(dx * dx + dy * dy + dz * dz)
 
         let cylinder = SCNCylinder(radius: 0.075, height: CGFloat(length))
         cylinder.radialSegmentCount = 5
-        cylinder.firstMaterial?.diffuse.contents =
-            UIColor.white.withAlphaComponent(0.78)
-        cylinder.firstMaterial?.emission.contents =
-            UIColor.white.withAlphaComponent(0.08)
+        cylinder.firstMaterial?.diffuse.contents = UIColor.white.withAlphaComponent(0.78)
+        cylinder.firstMaterial?.emission.contents = UIColor.white.withAlphaComponent(0.08)
 
         let node = SCNNode(geometry: cylinder)
-        node.position =
-            SCNVector3(
-                (a.x+b.x)/2,
-                (a.y+b.y)/2,
-                (a.z+b.z)/2
-            )
-
+        node.position = SCNVector3(
+            (a.x + b.x) / 2,
+            (a.y + b.y) / 2,
+            (a.z + b.z) / 2
+        )
         node.look(
             at: b,
-            up: SCNVector3(0,1,0),
-            localFront: SCNVector3(0,1,0)
+            up: SCNVector3(0, 1, 0),
+            localFront: SCNVector3(0, 1, 0)
         )
         return node
     }
 }
+
