@@ -23,173 +23,91 @@ struct ContentView: View {
     @State private var appliedMessage = false
     @AppStorage("drivetrainMode") private var drivetrainMode = "COG"
 
-    private let timer = Timer.publish(
-        every: 0.2,
-        on: .main,
-        in: .common
-    )
-    .autoconnect()
+    private let timer = Timer.publish(every: 0.2, on: .main, in: .common).autoconnect()
 
     var body: some View {
         TabView {
             ridePage
-                .tabItem {
-                    Label(
-                        "Ride",
-                        systemImage: "bicycle"
-                    )
-                }
-
+                .tabItem { Label("Ride", systemImage: "bicycle") }
             climb3DPage
-                .tabItem {
-                    Label(
-                        "3D",
-                        systemImage: "mountain.2.fill"
-                    )
-                }
-
+                .tabItem { Label("3D", systemImage: "mountain.2.fill") }
             setupPage
-                .tabItem {
-                    Label(
-                        "Setup",
-                        systemImage: "slider.horizontal.3"
-                    )
-                }
-
+                .tabItem { Label("Setup", systemImage: "slider.horizontal.3") }
             dataPage
-                .tabItem {
-                    Label(
-                        "Data",
-                        systemImage: "doc.text"
-                    )
-                }
+                .tabItem { Label("Data", systemImage: "doc.text") }
         }
-        .onAppear {
-            loadDrivetrainDraft()
-        }
+        .onAppear { loadDrivetrainDraft() }
         .onReceive(timer) { now in
-            guard trainer.controlReady else {
-                return
-            }
+            guard trainer.controlReady else { return }
 
-            if let targetResistance =
-                ride.tick(
-                    cadenceRPM:
-                        trainer.cadenceRPM,
-                    actualPowerW:
-                        trainer.power3sW,
-                    now: now
-                ) {
-
+            // Build 29 deliberately restores the validated RideClimb Build 25
+            // ride engine. Do not feed power into route speed here: cadence +
+            // the native virtual ratio remain the single source for RideModel
+            // speed/distance, including REAL (neutral 1.00x virtual shift).
+            if let targetResistance = ride.tick(
+                cadenceRPM: trainer.cadenceRPM,
+                now: now
+            ) {
                 if lastSentResistance == nil ||
-                    abs(
-                        targetResistance -
-                        (lastSentResistance ?? 0)
-                    ) >= 0.5 {
+                    abs(targetResistance - (lastSentResistance ?? 0)) >= 0.5 {
 
-                    trainer.setTargetResistance(
-                        targetResistance
-                    )
-
-                    lastSentResistance =
-                        targetResistance
+                    trainer.setTargetResistance(targetResistance)
+                    lastSentResistance = targetResistance
                 }
             }
 
             if trainer.nativeVirtualShiftReady &&
-                trainer.nativeVirtualGear !=
-                ride.nativeGear {
+                trainer.nativeVirtualGear != ride.nativeGear {
 
-                trainer.setVirtualRatio(
-                    ride.currentRatio
-                )
+                trainer.setVirtualRatio(ride.currentRatio)
             }
 
             if ride.isRiding {
-
                 if lastLogSampleAt == nil ||
-                    now.timeIntervalSince(
-                        lastLogSampleAt!
-                    ) >= 0.5 {
+                    now.timeIntervalSince(lastLogSampleAt!) >= 0.5 {
 
                     ride.recordSample(
-                        actualPowerW:
-                            trainer.powerW,
-                        power3sW:
-                            trainer.power3sW,
-                        heartRateBPM:
-                            trainer.heartRateBPM,
-                        trainerSpeedKPH:
-                            trainer.speedKPH,
-                        cadenceRPM:
-                            trainer.cadenceRPM,
+                        actualPowerW: trainer.powerW,
+                        power3sW: trainer.power3sW,
+                        heartRateBPM: trainer.heartRateBPM,
+                        trainerSpeedKPH: trainer.speedKPH,
+                        cadenceRPM: trainer.cadenceRPM,
                         now: now
                     )
 
                     lastLogSampleAt = now
                 }
-
             } else {
-
                 lastLogSampleAt = nil
             }
         }
-        .sheet(
-            isPresented:
-                $showShareSheet
-        ) {
+        .sheet(isPresented: $showShareSheet) {
             if let exportURL {
-                ShareSheet(
-                    items: [
-                        exportURL
-                    ]
-                )
+                ShareSheet(items: [exportURL])
             }
         }
         .fileImporter(
-            isPresented:
-                $showImporter,
+            isPresented: $showImporter,
             allowedContentTypes: [
-                UTType(
-                    filenameExtension: "gpx"
-                ) ?? .xml
+                UTType(filenameExtension: "gpx") ?? .xml
             ],
-            allowsMultipleSelection:
-                false
+            allowsMultipleSelection: false
         ) { result in
 
             switch result {
-
             case .success(let urls):
-
-                guard let url =
-                    urls.first
-                else {
-                    return
-                }
+                guard let url = urls.first else { return }
 
                 do {
-                    try ride.loadGPX(
-                        url: url
-                    )
-
-                    try climb3D.load(
-                        route: ride.route
-                    )
-
-                    lastSentResistance =
-                        nil
-
+                    try ride.loadGPX(url: url)
+                    try climb3D.load(route: ride.route)
+                    lastSentResistance = nil
                 } catch {
-
-                    ride.status =
-                        "GPX error: \(error.localizedDescription)"
+                    ride.status = "GPX error: \(error.localizedDescription)"
                 }
 
             case .failure(let error):
-
-                ride.status =
-                    "Import error: \(error.localizedDescription)"
+                ride.status = "Import error: \(error.localizedDescription)"
             }
         }
     }
@@ -197,16 +115,9 @@ struct ContentView: View {
     private var ridePage: some View {
         NavigationStack {
             GeometryReader { geo in
+                let compact = geo.size.height < 700
 
-                let compact =
-                    geo.size.height < 700
-
-                VStack(
-                    spacing:
-                        compact
-                        ? 7
-                        : 9
-                ) {
+                VStack(spacing: compact ? 7 : 9) {
                     connectionStrip
 
                     HStack(spacing: 10) {
@@ -230,12 +141,7 @@ struct ContentView: View {
                             hrZoneColor
                         )
                     }
-                    .frame(
-                        height:
-                            compact
-                            ? 116
-                            : 132
-                    )
+                    .frame(height: compact ? 116 : 132)
 
                     HStack(spacing: 7) {
                         dashMetric(
@@ -273,254 +179,165 @@ struct ContentView: View {
                             ""
                         )
                     }
-                    .frame(
-                        height:
-                            compact
-                            ? 60
-                            : 66
-                    )
+                    .frame(height: compact ? 60 : 66)
 
                     VStack(spacing: 5) {
-
-                        if let route =
-                            ride.route {
-
+                        if let route = ride.route {
                             RouteProfileView(
                                 route: route,
-                                progress:
-                                    ride.progress
+                                progress: ride.progress
                             )
-                            .frame(
-                                maxHeight:
-                                    .infinity
-                            )
+                            .frame(maxHeight: .infinity)
 
                             HStack {
                                 Text(
-                                    ride.routeName ??
-                                    "GPX"
+                                    ride.routeName ?? "GPX"
                                 )
                                 .lineLimit(1)
 
                                 Spacer()
 
                                 VStack(
-                                    alignment:
-                                        .trailing,
+                                    alignment: .trailing,
                                     spacing: 1
                                 ) {
                                     Text(
                                         String(
-                                            format:
-                                                "%.1f / %.1f km",
-                                            ride.distanceM /
-                                                1000,
-                                            route
-                                                .totalDistanceM /
-                                                1000
+                                            format: "%.1f / %.1f km",
+                                            ride.distanceM / 1000,
+                                            route.totalDistanceM / 1000
                                         )
                                     )
                                     .monospacedDigit()
 
                                     Text(
-                                        "ETA " +
-                                        ride.etaText
+                                        "ETA " + ride.etaText
                                     )
                                     .monospacedDigit()
                                 }
                             }
                             .font(
-                                .caption
-                                .weight(
-                                    .semibold
-                                )
+                                .caption.weight(.semibold)
                             )
-                            .foregroundStyle(
-                                .secondary
-                            )
+                            .foregroundStyle(.secondary)
 
                         } else {
-
-                            Spacer(
-                                minLength: 0
-                            )
+                            Spacer(minLength: 0)
 
                             Image(
-                                systemName:
-                                    "mountain.2.fill"
+                                systemName: "mountain.2.fill"
                             )
                             .font(.title2)
-                            .foregroundStyle(
-                                .secondary
-                            )
+                            .foregroundStyle(.secondary)
 
                             Text(
                                 "Choose a GPX route in Setup"
                             )
                             .font(
-                                .subheadline
-                                .weight(
-                                    .semibold
-                                )
+                                .subheadline.weight(.semibold)
                             )
-                            .foregroundStyle(
-                                .secondary
-                            )
+                            .foregroundStyle(.secondary)
 
-                            Spacer(
-                                minLength: 0
-                            )
+                            Spacer(minLength: 0)
                         }
                     }
                     .padding(10)
                     .frame(
-                        maxWidth:
-                            .infinity,
-                        minHeight:
-                            compact
-                            ? 250
-                            : 290,
-                        maxHeight:
-                            compact
-                            ? 250
-                            : 290
+                        maxWidth: .infinity,
+                        minHeight: compact ? 250 : 290,
+                        maxHeight: compact ? 250 : 290
                     )
                     .background(
                         .thinMaterial,
-                        in:
-                            RoundedRectangle(
-                                cornerRadius:
-                                    20
-                            )
+                        in: RoundedRectangle(
+                            cornerRadius: 20
+                        )
                     )
 
-                    if drivetrainMode ==
-                        "COG" {
-
-                        HStack(
-                            spacing: 12
-                        ) {
+                    if drivetrainMode == "COG" {
+                        HStack(spacing: 12) {
                             dashboardShifter(
                                 "CHAINRING",
                                 minus: {
-                                    ride
-                                        .shiftFrontSmaller()
-
+                                    ride.shiftFrontSmaller()
                                     syncNativeGear()
                                 },
                                 plus: {
-                                    ride
-                                        .shiftFrontLarger()
-
+                                    ride.shiftFrontLarger()
                                     syncNativeGear()
                                 },
                                 minusDisabled:
-                                    ride
-                                        .frontChainrings
-                                        .count < 2 ||
-                                    ride.frontIndex ==
-                                        0,
+                                    ride.frontChainrings.count < 2 ||
+                                    ride.frontIndex == 0,
                                 plusDisabled:
-                                    ride
-                                        .frontChainrings
-                                        .count < 2 ||
+                                    ride.frontChainrings.count < 2 ||
                                     ride.frontIndex >=
-                                    ride
-                                        .frontChainrings
-                                        .count - 1
+                                    ride.frontChainrings.count - 1
                             )
 
                             dashboardShifter(
                                 "SPROCKET",
                                 minus: {
-                                    ride
-                                        .shiftRearSmaller()
-
+                                    ride.shiftRearSmaller()
                                     syncNativeGear()
                                 },
                                 plus: {
-                                    ride
-                                        .shiftRearLarger()
-
+                                    ride.shiftRearLarger()
                                     syncNativeGear()
                                 },
                                 minusDisabled:
-                                    ride.rearIndex ==
-                                    0,
+                                    ride.rearIndex == 0,
                                 plusDisabled:
                                     ride.rearIndex >=
-                                    ride.cassette
-                                        .count - 1
+                                    ride.cassette.count - 1
                             )
                         }
                         .frame(
-                            height:
-                                compact
-                                ? 70
-                                : 78
+                            height: compact ? 70 : 78
                         )
 
                     } else {
-
                         HStack {
                             Image(
-                                systemName:
-                                    "bicycle"
+                                systemName: "bicycle"
                             )
 
                             VStack(
-                                alignment:
-                                    .leading,
+                                alignment: .leading,
                                 spacing: 2
                             ) {
                                 Text(
                                     "REAL DRIVETRAIN"
                                 )
-                                .font(
-                                    .caption
-                                    .bold()
-                                )
+                                .font(.caption.bold())
 
                                 Text(
                                     "Use the bike's physical shifters"
                                 )
                                 .font(.caption2)
-                                .foregroundStyle(
-                                    .secondary
-                                )
+                                .foregroundStyle(.secondary)
                             }
 
                             Spacer()
 
                             Text("1.00×")
                                 .font(
-                                    .headline
-                                    .monospacedDigit()
+                                    .headline.monospacedDigit()
                                 )
                         }
-                        .padding(
-                            .horizontal,
-                            14
-                        )
+                        .padding(.horizontal, 14)
                         .frame(
-                            height:
-                                compact
-                                ? 58
-                                : 64
+                            height: compact ? 58 : 64
                         )
                         .background(
                             .thinMaterial,
-                            in:
-                                RoundedRectangle(
-                                    cornerRadius:
-                                        18
-                                )
+                            in: RoundedRectangle(
+                                cornerRadius: 18
+                            )
                         )
                     }
 
-                    HStack(
-                        spacing: 12
-                    ) {
+                    HStack(spacing: 12) {
                         Button {
                             if ride.isRiding {
                                 ride.pauseRide()
@@ -528,7 +345,6 @@ struct ContentView: View {
                                 syncNativeGear()
                                 ride.startRide()
                             }
-
                         } label: {
                             Label(
                                 ride.isRiding
@@ -539,14 +355,9 @@ struct ContentView: View {
                                     ? "pause.fill"
                                     : "play.fill"
                             )
-                            .frame(
-                                maxWidth:
-                                    .infinity
-                            )
+                            .frame(maxWidth: .infinity)
                         }
-                        .buttonStyle(
-                            .borderedProminent
-                        )
+                        .buttonStyle(.borderedProminent)
                         .controlSize(.large)
                         .disabled(
                             ride.route == nil ||
@@ -555,111 +366,62 @@ struct ContentView: View {
 
                         Button {
                             ride.resetSession()
-
-                            lastSentResistance =
-                                nil
-
+                            lastSentResistance = nil
                         } label: {
                             Label(
                                 "Reset",
                                 systemImage:
                                     "arrow.counterclockwise"
                             )
-                            .frame(
-                                maxWidth:
-                                    .infinity
-                            )
+                            .frame(maxWidth: .infinity)
                         }
-                        .buttonStyle(
-                            .bordered
-                        )
+                        .buttonStyle(.bordered)
                         .controlSize(.large)
                         .disabled(
                             ride.route == nil
                         )
                     }
                 }
-                .padding(
-                    .horizontal,
-                    12
-                )
-                .padding(
-                    .vertical,
-                    5
-                )
+                .padding(.horizontal, 12)
+                .padding(.vertical, 5)
                 .frame(
-                    width:
-                        geo.size.width,
-                    height:
-                        geo.size.height,
+                    width: geo.size.width,
+                    height: geo.size.height,
                     alignment: .top
                 )
             }
-            .navigationTitle(
-                "RideClimbPRO"
-            )
-            .navigationBarTitleDisplayMode(
-                .inline
-            )
+            .navigationTitle("RideClimbPRO")
+            .navigationBarTitleDisplayMode(.inline)
         }
     }
+
 
     private var climb3DPage: some View {
         NavigationStack {
             ZStack {
-                if climb3D.hasMesh,
-                   let route =
-                    ride.route {
-
+                if climb3D.hasMesh, let route = ride.route {
                     RideClimbPRO3DView(
-                        sceneController:
-                            climb3D
-                                .sceneController,
-                        distanceM:
-                            ride.distanceM
+                        sceneController: climb3D.sceneController,
+                        distanceM: ride.distanceM
                     )
-                    .ignoresSafeArea(
-                        edges: .top
-                    )
+                    .ignoresSafeArea(edges: .top)
 
                     VStack {
-                        VStack(
-                            spacing: 8
-                        ) {
-                            HStack(
-                                spacing: 8
-                            ) {
-                                VStack(
-                                    alignment:
-                                        .leading,
-                                    spacing: 2
-                                ) {
-                                    Text(
-                                        ride.routeName ??
-                                        "GPX"
-                                    )
-                                    .font(
-                                        .caption
-                                        .weight(
-                                            .semibold
-                                        )
-                                    )
-                                    .lineLimit(1)
+                        VStack(spacing: 8) {
+                            HStack(spacing: 8) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(ride.routeName ?? "GPX")
+                                        .font(.caption.weight(.semibold))
+                                        .lineLimit(1)
 
                                     Text(
                                         String(
-                                            format:
-                                                "%.1f / %.1f km",
-                                            ride.distanceM /
-                                                1000,
-                                            route
-                                                .totalDistanceM /
-                                                1000
+                                            format: "%.1f / %.1f km",
+                                            ride.distanceM / 1000,
+                                            route.totalDistanceM / 1000
                                         )
                                     )
-                                    .font(
-                                        .caption2
-                                    )
+                                    .font(.caption2)
                                     .monospacedDigit()
                                 }
 
@@ -667,39 +429,28 @@ struct ContentView: View {
 
                                 Text(
                                     String(
-                                        format:
-                                            "%.1f%%",
-                                        ride
-                                            .currentGradePercent
+                                        format: "%.1f%%",
+                                        ride.currentGradePercent
                                     )
                                 )
-                                .font(
-                                    .title2
-                                    .bold()
-                                )
+                                .font(.title2.bold())
                                 .monospacedDigit()
                             }
 
-                            HStack(
-                                spacing: 10
-                            ) {
+                            HStack(spacing: 10) {
                                 Label(
                                     "\(trainer.power3sW) W",
-                                    systemImage:
-                                        "bolt.fill"
+                                    systemImage: "bolt.fill"
                                 )
                                 .monospacedDigit()
 
                                 Spacer()
 
                                 Label(
-                                    trainer
-                                        .heartRateBPM >
-                                        0
+                                    trainer.heartRateBPM > 0
                                         ? "\(trainer.heartRateBPM) bpm"
                                         : "— bpm",
-                                    systemImage:
-                                        "heart.fill"
+                                    systemImage: "heart.fill"
                                 )
                                 .monospacedDigit()
 
@@ -707,33 +458,18 @@ struct ContentView: View {
 
                                 Label(
                                     String(
-                                        format:
-                                            "%.1f km/h",
-                                        ride
-                                            .virtualSpeedKPH
+                                        format: "%.1f km/h",
+                                        ride.virtualSpeedKPH
                                     ),
-                                    systemImage:
-                                        "speedometer"
+                                    systemImage: "speedometer"
                                 )
                                 .monospacedDigit()
                             }
-                            .font(
-                                .caption
-                                .weight(
-                                    .semibold
-                                )
-                            )
+                            .font(.caption.weight(.semibold))
                         }
                         .padding(10)
-                        .background(
-                            .ultraThinMaterial
-                        )
-                        .clipShape(
-                            RoundedRectangle(
-                                cornerRadius:
-                                    12
-                            )
-                        )
+                        .background(.ultraThinMaterial)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
                         .padding()
 
                         Spacer()
@@ -741,250 +477,163 @@ struct ContentView: View {
                         HStack {
                             Text(
                                 String(
-                                    format:
-                                        "%.0f m",
-                                    ride
-                                        .currentElevationM
+                                    format: "%.0f m",
+                                    ride.currentElevationM
                                 )
                             )
                             .monospacedDigit()
 
                             Spacer()
 
-                            Button(
-                                "Follow"
-                            ) {
-                                climb3D
-                                    .resetCamera()
+                            Button("Overview") {
+                                climb3D.showOverview()
                             }
-                            .buttonStyle(
-                                .borderedProminent
-                            )
+                            .buttonStyle(.bordered)
+
+                            Button("Follow") {
+                                climb3D.resetCamera()
+                            }
+                            .buttonStyle(.borderedProminent)
                         }
-                        .font(
-                            .caption
-                            .weight(
-                                .semibold
-                            )
-                        )
+                        .font(.caption.weight(.semibold))
                         .padding(10)
-                        .background(
-                            .ultraThinMaterial
-                        )
-                        .clipShape(
-                            RoundedRectangle(
-                                cornerRadius:
-                                    12
-                            )
-                        )
+                        .background(.ultraThinMaterial)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
                         .padding()
                     }
-
                 } else {
-
                     ContentUnavailableView(
                         "No 3D route",
-                        systemImage:
-                            "mountain.2",
-                        description:
-                            Text(
-                                "Import the GPX from the Ride tab. The same RideClimbPRO route drives both the trainer and the 3D view."
-                            )
+                        systemImage: "mountain.2",
+                        description: Text(
+                            "Import the GPX from the Ride tab. The same RideClimbPRO route drives both the trainer and the 3D view."
+                        )
                     )
                 }
             }
-            .navigationTitle(
-                "Climb 3D"
-            )
-            .navigationBarTitleDisplayMode(
-                .inline
-            )
+            .navigationTitle("Climb 3D")
+            .navigationBarTitleDisplayMode(.inline)
         }
     }
 
     private var setupPage: some View {
         NavigationStack {
             Form {
-                Section(
-                    "Ride mode"
-                ) {
+                Section("Ride mode") {
                     Picker(
                         "Shifting",
-                        selection:
-                            $drivetrainMode
+                        selection: $drivetrainMode
                     ) {
-                        Text(
-                            "COG / Virtual"
-                        )
-                        .tag("COG")
+                        Text("COG / Virtual")
+                            .tag("COG")
 
-                        Text(
-                            "Real drivetrain"
-                        )
-                        .tag("REAL")
+                        Text("Real drivetrain")
+                            .tag("REAL")
                     }
-                    .pickerStyle(
-                        .segmented
-                    )
+                    .pickerStyle(.segmented)
                     .onChange(
-                        of:
-                            drivetrainMode
+                        of: drivetrainMode
                     ) { _, newMode in
 
-                        if newMode ==
-                            "REAL" {
-
+                        if newMode == "REAL" {
                             setRealDrivetrainNeutral()
-
                         } else {
-
                             syncNativeGear()
                         }
                     }
 
-                    if drivetrainMode ==
-                        "COG" {
-
+                    if drivetrainMode == "COG" {
                         Text(
                             "RideClimbPRO converts your selected chainring and cassette to the closest native virtual gear."
                         )
                         .font(.caption)
-                        .foregroundStyle(
-                            .secondary
-                        )
+                        .foregroundStyle(.secondary)
 
                     } else {
-
                         Text(
                             "RideClimbPRO holds the virtual drivetrain at 1.00×. Shift with the bike's real drivetrain."
                         )
                         .font(.caption)
-                        .foregroundStyle(
-                            .secondary
-                        )
+                        .foregroundStyle(.secondary)
                     }
                 }
 
                 Section("Route") {
-                    Button(
-                        "Import GPX"
-                    ) {
-                        showImporter =
-                            true
+                    Button("Import GPX") {
+                        showImporter = true
                     }
 
-                    if let route =
-                        ride.route {
-
+                    if let route = ride.route {
                         Text(
-                            ride.routeName ??
-                            "GPX"
+                            ride.routeName ?? "GPX"
                         )
 
                         Text(
                             String(
-                                format:
-                                    "%.1f km",
-                                route
-                                    .totalDistanceM /
-                                    1000
+                                format: "%.1f km",
+                                route.totalDistanceM / 1000
                             )
                         )
-                        .foregroundStyle(
-                            .secondary
-                        )
+                        .foregroundStyle(.secondary)
                     }
                 }
 
-                Section(
-                    "Smart trainer"
-                ) {
+                Section("Smart trainer") {
                     HStack {
-                        Button(
-                            "Scan"
-                        ) {
-                            trainer
-                                .startScan()
+                        Button("Scan") {
+                            trainer.startScan()
                         }
 
                         Spacer()
 
-                        Button(
-                            "Disconnect"
-                        ) {
-                            trainer
-                                .disconnect()
+                        Button("Disconnect") {
+                            trainer.disconnect()
                         }
                         .disabled(
-                            !trainer
-                                .isConnected
+                            !trainer.isConnected
                         )
                     }
 
-                    if !trainer
-                        .discoveredTrainers
-                        .isEmpty {
-
+                    if !trainer.discoveredTrainers.isEmpty {
                         Picker(
                             "Trainer",
                             selection:
-                                $trainer
-                                    .selectedTrainerID
+                                $trainer.selectedTrainerID
                         ) {
-                            Text(
-                                "Select"
-                            )
-                            .tag(
-                                Optional<UUID>
-                                    .none
-                            )
+                            Text("Select")
+                                .tag(
+                                    Optional<UUID>.none
+                                )
 
                             ForEach(
-                                trainer
-                                    .discoveredTrainers
+                                trainer.discoveredTrainers
                             ) {
-                                Text(
-                                    $0.name
-                                )
-                                .tag(
-                                    Optional(
-                                        $0.id
+                                Text($0.name)
+                                    .tag(
+                                        Optional($0.id)
                                     )
-                                )
                             }
                         }
 
-                        Button(
-                            "Connect trainer"
-                        ) {
-                            trainer
-                                .connectSelected()
+                        Button("Connect trainer") {
+                            trainer.connectSelected()
                         }
                     }
                 }
 
-                Section(
-                    "Heart-rate sensor"
-                ) {
+                Section("Heart-rate sensor") {
                     HStack {
-                        Button(
-                            "Scan HR"
-                        ) {
-                            trainer
-                                .startHeartRateScan()
+                        Button("Scan HR") {
+                            trainer.startHeartRateScan()
                         }
 
                         Spacer()
 
-                        Button(
-                            "Disconnect HR"
-                        ) {
-                            trainer
-                                .disconnectHeartRate()
+                        Button("Disconnect HR") {
+                            trainer.disconnectHeartRate()
                         }
                         .disabled(
-                            !trainer
-                                .heartRateConnected
+                            !trainer.heartRateConnected
                         )
                     }
 
@@ -995,35 +644,25 @@ struct ContentView: View {
                         Picker(
                             "HR sensor",
                             selection:
-                                $trainer
-                                    .selectedHeartRateID
+                                $trainer.selectedHeartRateID
                         ) {
-                            Text(
-                                "Select"
-                            )
-                            .tag(
-                                Optional<UUID>
-                                    .none
-                            )
+                            Text("Select")
+                                .tag(
+                                    Optional<UUID>.none
+                                )
 
                             ForEach(
                                 trainer
                                     .discoveredHeartRateDevices
                             ) {
-                                Text(
-                                    $0.name
-                                )
-                                .tag(
-                                    Optional(
-                                        $0.id
+                                Text($0.name)
+                                    .tag(
+                                        Optional($0.id)
                                     )
-                                )
                             }
                         }
 
-                        Button(
-                            "Connect HR"
-                        ) {
+                        Button("Connect HR") {
                             trainer
                                 .connectSelectedHeartRate()
                         }
@@ -1033,49 +672,38 @@ struct ContentView: View {
                 Section("Rider") {
                     Stepper(
                         "Rider weight: \(Int(ride.riderWeightKg)) kg",
-                        value:
-                            $ride
-                                .riderWeightKg,
+                        value: $ride.riderWeightKg,
                         in: 40...150
                     )
 
                     Stepper(
                         "Bike + equipment: \(Int(ride.bikeWeightKg)) kg",
-                        value:
-                            $ride
-                                .bikeWeightKg,
+                        value: $ride.bikeWeightKg,
                         in: 5...30
                     )
 
                     Stepper(
                         "FTP: \(ride.ftpW) W",
-                        value:
-                            $ride.ftpW,
+                        value: $ride.ftpW,
                         in: 50...500,
                         step: 5
                     )
 
                     Stepper(
                         "HR max: \(ride.maxHR) bpm",
-                        value:
-                            $ride.maxHR,
+                        value: $ride.maxHR,
                         in: 100...230
                     )
 
                     Stepper(
                         "Age: \(ride.age) years",
-                        value:
-                            $ride.age,
+                        value: $ride.age,
                         in: 10...100
                     )
                 }
 
-                if drivetrainMode ==
-                    "COG" {
-
-                    Section(
-                        "Virtual drivetrain"
-                    ) {
+                if drivetrainMode == "COG" {
+                    Section("Virtual drivetrain") {
                         Picker(
                             "Chainrings",
                             selection:
@@ -1089,9 +717,7 @@ struct ContentView: View {
                             Text("2x")
                                 .tag(2)
                         }
-                        .pickerStyle(
-                            .segmented
-                        )
+                        .pickerStyle(.segmented)
 
                         Stepper(
                             "Chainring 1: \(draftFront1)T",
@@ -1102,9 +728,7 @@ struct ContentView: View {
                             in: 20...70
                         )
 
-                        if draftChainringCount ==
-                            2 {
-
+                        if draftChainringCount == 2 {
                             Stepper(
                                 "Chainring 2: \(draftFront2)T",
                                 value:
@@ -1149,41 +773,29 @@ struct ContentView: View {
                             "Current: \(ride.frontChainrings.map(String.init).joined(separator: "/")) × \(ride.cassette.map(String.init).joined(separator: "-"))"
                         )
                         .font(.caption)
-                        .foregroundStyle(
-                            .secondary
-                        )
+                        .foregroundStyle(.secondary)
                     }
                 }
             }
-            .navigationTitle(
-                "Setup"
-            )
+            .navigationTitle("Setup")
         }
     }
 
     private var dataPage: some View {
         NavigationStack {
             Form {
-                Section(
-                    "Activity"
-                ) {
+                Section("Activity") {
                     Text(
                         "\(ride.logSampleCount) samples"
                     )
 
-                    Button(
-                        "Export FIT"
-                    ) {
+                    Button("Export FIT") {
                         do {
                             exportURL =
-                                try ride
-                                    .writeSessionFIT()
+                                try ride.writeSessionFIT()
 
-                            showShareSheet =
-                                true
-
+                            showShareSheet = true
                         } catch {
-
                             ride.status =
                                 "FIT export error: \(error.localizedDescription)"
                         }
@@ -1192,63 +804,46 @@ struct ContentView: View {
                         .borderedProminent
                     )
                     .disabled(
-                        ride.logSampleCount ==
-                        0
+                        ride.logSampleCount == 0
                     )
                 }
 
-                Section(
-                    "Diagnostics"
-                ) {
-                    Button(
-                        "Export CSV"
-                    ) {
+                Section("Diagnostics") {
+                    Button("Export CSV") {
                         do {
                             exportURL =
-                                try ride
-                                    .writeSessionCSV()
+                                try ride.writeSessionCSV()
 
-                            showShareSheet =
-                                true
-
+                            showShareSheet = true
                         } catch {
-
                             ride.status =
                                 "Log export error: \(error.localizedDescription)"
                         }
                     }
                     .disabled(
-                        ride.logSampleCount ==
-                        0
+                        ride.logSampleCount == 0
                     )
                 }
 
                 Section {
                     DisclosureGroup(
                         "Diagnostics",
-                        isExpanded:
-                            $showDiagnostics
+                        isExpanded: $showDiagnostics
                     ) {
                         Text(
                             String(
                                 format:
                                     "raw grade %.2f%% • filtered %.2f%% • target resistance %.2f%% • theoretical %.0f W",
-                                ride
-                                    .rawGradePercent,
-                                ride
-                                    .smoothedGradePercent,
-                                ride
-                                    .targetResistancePercent,
+                                ride.rawGradePercent,
+                                ride.smoothedGradePercent,
+                                ride.targetResistancePercent,
                                 Double(
-                                    ride
-                                        .targetPowerW
+                                    ride.targetPowerW
                                 )
                             )
                         )
                         .font(.caption2)
-                        .foregroundStyle(
-                            .secondary
-                        )
+                        .foregroundStyle(.secondary)
 
                         ScrollView {
                             Text(
@@ -1257,19 +852,14 @@ struct ContentView: View {
                             .font(
                                 .system(
                                     .caption2,
-                                    design:
-                                        .monospaced
+                                    design: .monospaced
                                 )
                             )
                             .frame(
-                                maxWidth:
-                                    .infinity,
-                                alignment:
-                                    .leading
+                                maxWidth: .infinity,
+                                alignment: .leading
                             )
-                            .textSelection(
-                                .enabled
-                            )
+                            .textSelection(.enabled)
                         }
                         .frame(
                             minHeight: 160,
@@ -1278,9 +868,7 @@ struct ContentView: View {
                     }
                 }
             }
-            .navigationTitle(
-                "Data"
-            )
+            .navigationTitle("Data")
         }
     }
 
@@ -1291,8 +879,7 @@ struct ContentView: View {
                     trainer.controlReady
                         ? Color.green
                         : (
-                            trainer
-                                .isConnected
+                            trainer.isConnected
                             ? Color.orange
                             : Color.gray
                         )
@@ -1305,41 +892,25 @@ struct ContentView: View {
             Text(
                 trainer.controlReady
                     ? "Trainer ready"
-                    : trainer
-                        .connectionState
+                    : trainer.connectionState
             )
             .font(
-                .caption
-                .weight(
-                    .semibold
-                )
+                .caption.weight(.semibold)
             )
 
             Spacer()
 
-            if trainer
-                .heartRateConnected {
-
+            if trainer.heartRateConnected {
                 Image(
-                    systemName:
-                        "heart.fill"
+                    systemName: "heart.fill"
                 )
-                .foregroundStyle(
-                    .red
-                )
+                .foregroundStyle(.red)
             }
 
-            if trainer
-                .nativeVirtualShiftReady {
-
+            if trainer.nativeVirtualShiftReady {
                 Text("VSHIFT")
-                    .font(
-                        .caption2
-                        .bold()
-                    )
-                    .foregroundStyle(
-                        .green
-                    )
+                    .font(.caption2.bold())
+                    .foregroundStyle(.green)
             }
         }
     }
@@ -1358,85 +929,57 @@ struct ContentView: View {
         ) {
             Text(title)
                 .font(
-                    .caption
-                    .weight(.bold)
+                    .caption.weight(.bold)
                 )
-                .foregroundStyle(
-                    .secondary
-                )
+                .foregroundStyle(.secondary)
 
-            Spacer(
-                minLength: 0
-            )
+            Spacer(minLength: 0)
 
             HStack(
-                alignment:
-                    .firstTextBaseline,
+                alignment: .firstTextBaseline,
                 spacing: 3
             ) {
                 Text(value)
                     .font(
                         .system(
                             size: 44,
-                            weight:
-                                .bold,
-                            design:
-                                .rounded
+                            weight: .bold,
+                            design: .rounded
                         )
                     )
-                    .minimumScaleFactor(
-                        0.6
-                    )
+                    .minimumScaleFactor(0.6)
 
                 Text(unit)
                     .font(
-                        .headline
-                        .weight(
-                            .semibold
-                        )
+                        .headline.weight(.semibold)
                     )
             }
-            .foregroundStyle(
-                color
-            )
+            .foregroundStyle(color)
 
             Text(subtitle)
                 .font(
-                    .caption
-                    .weight(
-                        .semibold
-                    )
+                    .caption.weight(.semibold)
                 )
-                .foregroundStyle(
-                    color
-                )
+                .foregroundStyle(color)
         }
         .frame(
-            maxWidth:
-                .infinity,
+            maxWidth: .infinity,
             minHeight: 115,
-            alignment:
-                .leading
+            alignment: .leading
         )
         .padding(12)
         .background(
-            color.opacity(
-                0.09
-            ),
-            in:
-                RoundedRectangle(
-                    cornerRadius:
-                        18
-                )
+            color.opacity(0.09),
+            in: RoundedRectangle(
+                cornerRadius: 18
+            )
         )
         .overlay(
             RoundedRectangle(
                 cornerRadius: 18
             )
             .stroke(
-                color.opacity(
-                    0.22
-                )
+                color.opacity(0.22)
             )
         )
     }
@@ -1451,44 +994,29 @@ struct ContentView: View {
                 .font(
                     .system(
                         size: 9,
-                        weight:
-                            .bold
+                        weight: .bold
                     )
                 )
-                .foregroundStyle(
-                    .secondary
-                )
+                .foregroundStyle(.secondary)
 
             Text(value)
                 .font(
                     .system(
                         size: 16,
-                        weight:
-                            .bold,
-                        design:
-                            .rounded
+                        weight: .bold,
+                        design: .rounded
                     )
                 )
-                .minimumScaleFactor(
-                    0.55
-                )
+                .minimumScaleFactor(0.55)
                 .lineLimit(1)
         }
-        .frame(
-            maxWidth:
-                .infinity
-        )
-        .padding(
-            .vertical,
-            8
-        )
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 8)
         .background(
             .thinMaterial,
-            in:
-                RoundedRectangle(
-                    cornerRadius:
-                        11
-                )
+            in: RoundedRectangle(
+                cornerRadius: 11
+            )
         )
     }
 
@@ -1501,60 +1029,36 @@ struct ContentView: View {
     ) -> some View {
 
         HStack(spacing: 8) {
-            Button(
-                action: minus
-            ) {
+            Button(action: minus) {
                 Image(
-                    systemName:
-                        "minus"
+                    systemName: "minus"
                 )
                 .frame(
                     width: 34,
                     height: 30
                 )
             }
-            .buttonStyle(
-                .bordered
-            )
-            .disabled(
-                minusDisabled
-            )
+            .buttonStyle(.bordered)
+            .disabled(minusDisabled)
 
             Text(label)
-                .font(
-                    .caption2
-                    .bold()
-                )
-                .foregroundStyle(
-                    .secondary
-                )
-                .frame(
-                    minWidth: 68
-                )
+                .font(.caption2.bold())
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 68)
 
-            Button(
-                action: plus
-            ) {
+            Button(action: plus) {
                 Image(
-                    systemName:
-                        "plus"
+                    systemName: "plus"
                 )
                 .frame(
                     width: 34,
                     height: 30
                 )
             }
-            .buttonStyle(
-                .bordered
-            )
-            .disabled(
-                plusDisabled
-            )
+            .buttonStyle(.bordered)
+            .disabled(plusDisabled)
         }
-        .frame(
-            maxWidth:
-                .infinity
-        )
+        .frame(maxWidth: .infinity)
     }
 
     private func heroMetric(
@@ -1566,90 +1070,58 @@ struct ContentView: View {
     ) -> some View {
 
         VStack(
-            alignment:
-                .leading,
+            alignment: .leading,
             spacing: 3
         ) {
             Text(title)
-                .font(
-                    .caption
-                    .bold()
-                )
-                .foregroundStyle(
-                    .secondary
-                )
+                .font(.caption.bold())
+                .foregroundStyle(.secondary)
 
-            Spacer(
-                minLength: 0
-            )
+            Spacer(minLength: 0)
 
             HStack(
-                alignment:
-                    .firstTextBaseline,
+                alignment: .firstTextBaseline,
                 spacing: 3
             ) {
                 Text(value)
                     .font(
                         .system(
                             size: 46,
-                            weight:
-                                .bold,
-                            design:
-                                .rounded
+                            weight: .bold,
+                            design: .rounded
                         )
                     )
-                    .minimumScaleFactor(
-                        0.55
-                    )
+                    .minimumScaleFactor(0.55)
                     .lineLimit(1)
 
                 Text(unit)
-                    .font(
-                        .headline
-                        .bold()
-                    )
+                    .font(.headline.bold())
             }
-            .foregroundStyle(
-                color
-            )
+            .foregroundStyle(color)
 
             Text(subtitle)
-                .font(
-                    .caption
-                    .bold()
-                )
-                .foregroundStyle(
-                    color
-                )
+                .font(.caption.bold())
+                .foregroundStyle(color)
                 .lineLimit(1)
         }
         .padding(12)
         .frame(
-            maxWidth:
-                .infinity,
-            maxHeight:
-                .infinity,
-            alignment:
-                .leading
+            maxWidth: .infinity,
+            maxHeight: .infinity,
+            alignment: .leading
         )
         .background(
-            color.opacity(
-                0.10
-            ),
-            in:
-                RoundedRectangle(
-                    cornerRadius:
-                        22
-                )
+            color.opacity(0.10),
+            in: RoundedRectangle(
+                cornerRadius: 22
+            )
         )
         .overlay(
             RoundedRectangle(
                 cornerRadius: 22
             )
             .stroke(
-                color.opacity(
-                    0.24
-                )
+                color.opacity(0.24)
             )
         )
     }
@@ -1665,32 +1137,24 @@ struct ContentView: View {
                 .font(
                     .system(
                         size: 9,
-                        weight:
-                            .bold
+                        weight: .bold
                     )
                 )
-                .foregroundStyle(
-                    .secondary
-                )
+                .foregroundStyle(.secondary)
 
             HStack(
-                alignment:
-                    .firstTextBaseline,
+                alignment: .firstTextBaseline,
                 spacing: 2
             ) {
                 Text(value)
                     .font(
                         .system(
                             size: 20,
-                            weight:
-                                .bold,
-                            design:
-                                .rounded
+                            weight: .bold,
+                            design: .rounded
                         )
                     )
-                    .minimumScaleFactor(
-                        0.5
-                    )
+                    .minimumScaleFactor(0.5)
                     .lineLimit(1)
 
                 if !unit.isEmpty {
@@ -1698,29 +1162,22 @@ struct ContentView: View {
                         .font(
                             .system(
                                 size: 9,
-                                weight:
-                                    .semibold
+                                weight: .semibold
                             )
                         )
-                        .foregroundStyle(
-                            .secondary
-                        )
+                        .foregroundStyle(.secondary)
                 }
             }
         }
         .frame(
-            maxWidth:
-                .infinity,
-            maxHeight:
-                .infinity
+            maxWidth: .infinity,
+            maxHeight: .infinity
         )
         .background(
             .thinMaterial,
-            in:
-                RoundedRectangle(
-                    cornerRadius:
-                        15
-                )
+            in: RoundedRectangle(
+                cornerRadius: 15
+            )
         )
     }
 
@@ -1734,80 +1191,49 @@ struct ContentView: View {
 
         VStack(spacing: 5) {
             Text(title)
-                .font(
-                    .caption2
-                    .bold()
-                )
-                .foregroundStyle(
-                    .secondary
-                )
+                .font(.caption2.bold())
+                .foregroundStyle(.secondary)
 
             HStack(spacing: 8) {
-                Button(
-                    action: minus
-                ) {
+                Button(action: minus) {
                     Image(
-                        systemName:
-                            "minus"
+                        systemName: "minus"
                     )
-                    .font(
-                        .title3
-                        .bold()
-                    )
+                    .font(.title3.bold())
                     .frame(
-                        maxWidth:
-                            .infinity,
-                        maxHeight:
-                            .infinity
+                        maxWidth: .infinity,
+                        maxHeight: .infinity
                     )
                 }
-                .buttonStyle(
-                    .bordered
-                )
-                .disabled(
-                    minusDisabled
-                )
+                .buttonStyle(.bordered)
+                .disabled(minusDisabled)
 
-                Button(
-                    action: plus
-                ) {
+                Button(action: plus) {
                     Image(
-                        systemName:
-                            "plus"
+                        systemName: "plus"
                     )
-                    .font(
-                        .title3
-                        .bold()
-                    )
+                    .font(.title3.bold())
                     .frame(
-                        maxWidth:
-                            .infinity,
-                        maxHeight:
-                            .infinity
+                        maxWidth: .infinity,
+                        maxHeight: .infinity
                     )
                 }
                 .buttonStyle(
                     .borderedProminent
                 )
-                .disabled(
-                    plusDisabled
-                )
+                .disabled(plusDisabled)
             }
         }
         .padding(7)
         .frame(
-            maxWidth:
-                .infinity,
-            maxHeight:
-                .infinity
+            maxWidth: .infinity,
+            maxHeight: .infinity
         )
         .background(
             .thinMaterial,
-            in:
-                RoundedRectangle(
-                    cornerRadius:
-                        18
-                )
+            in: RoundedRectangle(
+                cornerRadius: 18
+            )
         )
     }
 
@@ -1820,47 +1246,31 @@ struct ContentView: View {
                 binding.wrappedValue
             },
             set: {
-                binding.wrappedValue =
-                    $0
-
-                drivetrainDirty =
-                    true
-
-                appliedMessage =
-                    false
+                binding.wrappedValue = $0
+                drivetrainDirty = true
+                appliedMessage = false
             }
         )
     }
 
     private func loadDrivetrainDraft() {
         draftChainringCount =
-            ride.frontChainrings
-                .count
+            ride.frontChainrings.count
 
         draftFront1 =
-            ride.frontChainrings
-                .first ?? 40
+            ride.frontChainrings.first ?? 40
 
         draftFront2 =
-            ride.frontChainrings
-                .count > 1
+            ride.frontChainrings.count > 1
             ? ride.frontChainrings[1]
-            : max(
-                53,
-                draftFront1
-            )
+            : max(53, draftFront1)
 
         draftCassette =
             ride.cassette
-                .map(
-                    String.init
-                )
-                .joined(
-                    separator: ","
-                )
+                .map(String.init)
+                .joined(separator: ",")
 
-        drivetrainDirty =
-            false
+        drivetrainDirty = false
     }
 
     private func applyDrivetrain() {
@@ -1878,11 +1288,9 @@ struct ContentView: View {
                     Int($0)
                 }
 
-        guard cassette.count >= 2
-        else {
+        guard cassette.count >= 2 else {
             ride.status =
                 "Drivetrain error: enter at least two sprockets"
-
             return
         }
 
@@ -1892,45 +1300,32 @@ struct ContentView: View {
 
         ride.setFrontTeeth(
             at: 0,
-            teeth:
-                draftFront1
+            teeth: draftFront1
         )
 
-        if draftChainringCount ==
-            2 {
-
+        if draftChainringCount == 2 {
             ride.setFrontTeeth(
                 at: 1,
-                teeth:
-                    draftFront2
+                teeth: draftFront2
             )
         }
 
-        ride.setCassette(
-            cassette
-        )
+        ride.setCassette(cassette)
 
         loadDrivetrainDraft()
         syncNativeGear()
 
-        appliedMessage =
-            true
+        appliedMessage = true
 
-        DispatchQueue
-            .main
-            .asyncAfter(
-                deadline:
-                    .now() +
-                    1.5
-            ) {
-                appliedMessage =
-                    false
-            }
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + 1.5
+        ) {
+            appliedMessage = false
+        }
     }
 
     private func syncNativeGear() {
-        lastSentResistance =
-            nil
+        lastSentResistance = nil
 
         guard trainer
             .nativeVirtualShiftReady
@@ -1938,15 +1333,9 @@ struct ContentView: View {
             return
         }
 
-        if drivetrainMode ==
-            "REAL" {
-
-            trainer.setVirtualRatio(
-                2.5
-            )
-
+        if drivetrainMode == "REAL" {
+            trainer.setVirtualRatio(2.5)
         } else {
-
             trainer.setVirtualRatio(
                 ride.currentRatio
             )
@@ -1954,8 +1343,7 @@ struct ContentView: View {
     }
 
     private func setRealDrivetrainNeutral() {
-        lastSentResistance =
-            nil
+        lastSentResistance = nil
 
         guard trainer
             .nativeVirtualShiftReady
@@ -1963,63 +1351,45 @@ struct ContentView: View {
             return
         }
 
-        trainer.setVirtualRatio(
-            2.5
-        )
+        trainer.setVirtualRatio(2.5)
     }
 
     private var powerFraction: Double {
         ride.ftpW > 0
-            ? Double(
-                trainer.power3sW
-            ) /
-            Double(
-                ride.ftpW
-            )
+            ? Double(trainer.power3sW) /
+              Double(ride.ftpW)
             : 0
     }
 
     private var hrFraction: Double {
         ride.maxHR > 0 &&
-        trainer.heartRateBPM >
-        0
-            ? Double(
-                trainer
-                    .heartRateBPM
-            ) /
-            Double(
-                ride.maxHR
-            )
+        trainer.heartRateBPM > 0
+            ? Double(trainer.heartRateBPM) /
+              Double(ride.maxHR)
             : 0
     }
 
     private var powerSubtitle: String {
         trainer.power3sW > 0
             ? String(
-                format:
-                    "%.0f%% FTP",
-                powerFraction *
-                    100
+                format: "%.0f%% FTP",
+                powerFraction * 100
             )
             : "— % FTP"
     }
 
     private var hrSubtitle: String {
-        trainer.heartRateBPM >
-        0
+        trainer.heartRateBPM > 0
             ? String(
-                format:
-                    "%.0f%% HRmax",
-                hrFraction *
-                    100
+                format: "%.0f%% HRmax",
+                hrFraction * 100
             )
             : "Connect HR sensor"
     }
 
     private var powerZoneColor: Color {
         zoneColor(
-            fraction:
-                powerFraction,
+            fraction: powerFraction,
             thresholds: [
                 0.55,
                 0.75,
@@ -2031,11 +1401,9 @@ struct ContentView: View {
     }
 
     private var hrZoneColor: Color {
-        trainer.heartRateBPM >
-        0
+        trainer.heartRateBPM > 0
             ? zoneColor(
-                fraction:
-                    hrFraction,
+                fraction: hrFraction,
                 thresholds: [
                     0.60,
                     0.70,
@@ -2052,28 +1420,23 @@ struct ContentView: View {
         thresholds: [Double]
     ) -> Color {
 
-        if fraction <
-            thresholds[0] {
+        if fraction < thresholds[0] {
             return .gray
         }
 
-        if fraction <
-            thresholds[1] {
+        if fraction < thresholds[1] {
             return .blue
         }
 
-        if fraction <
-            thresholds[2] {
+        if fraction < thresholds[2] {
             return .green
         }
 
-        if fraction <
-            thresholds[3] {
+        if fraction < thresholds[3] {
             return .yellow
         }
 
-        if fraction <
-            thresholds[4] {
+        if fraction < thresholds[4] {
             return .orange
         }
 
@@ -2085,162 +1448,73 @@ private struct RouteProfileView: View {
     let route: GPXRoute
     let progress: Double
 
+    /// Display-only profile smoothing. RideModel/GPX physics remain untouched.
+    /// Sampling uniformly by route distance removes the visible GPS "teeth"
+    /// without changing the GPX plan-view geometry or the trainer controller.
+    private var displayProfile: [(distanceM: Double, elevationM: Double)] {
+        guard route.totalDistanceM > 0 else { return [] }
+
+        let count = 220
+        let radiusM = min(35.0, max(18.0, route.totalDistanceM / 180.0))
+        let offsets: [Double] = [-1, -0.66, -0.33, 0, 0.33, 0.66, 1]
+        let weights: [Double] = [1, 2, 3, 4, 3, 2, 1]
+        let weightSum = weights.reduce(0, +)
+
+        return (0..<count).map { index in
+            let fraction = Double(index) / Double(count - 1)
+            let distance = route.totalDistanceM * fraction
+            var elevation = 0.0
+
+            for i in offsets.indices {
+                let sampleDistance = min(
+                    route.totalDistanceM,
+                    max(0, distance + offsets[i] * radiusM)
+                )
+                elevation += route.elevation(at: sampleDistance) * weights[i]
+            }
+
+            return (distance, elevation / weightSum)
+        }
+    }
+
     var body: some View {
         GeometryReader { _ in
-            let points =
-                route.points
+            let points = displayProfile
 
             if points.count >= 2 {
+                let minE = points.map { $0.elevationM }.min() ?? 0
+                let maxE = points.map { $0.elevationM }.max() ?? minE + 1
+                let spanE = max(1, maxE - minE)
+                let maxD = max(1, route.totalDistanceM)
 
-                let minE =
-                    points
-                        .map(
-                            \.elevationM
-                        )
-                        .min() ??
-                    0
+                Canvas { context, size in
+                    var profile = Path()
 
-                let maxE =
-                    points
-                        .map(
-                            \.elevationM
-                        )
-                        .max() ??
-                    minE + 1
-
-                let spanE =
-                    max(
-                        1,
-                        maxE -
-                        minE
-                    )
-
-                let maxD =
-                    max(
-                        1,
-                        route
-                            .totalDistanceM
-                    )
-
-                Canvas {
-                    context,
-                    size in
-
-                    var profile =
-                        Path()
-
-                    for (
-                        index,
-                        point
-                    ) in points
-                        .enumerated() {
-
-                        let x =
-                            CGFloat(
-                                point
-                                    .distanceM /
-                                maxD
-                            ) *
-                            size.width
-
-                        let y =
-                            size.height -
-                            CGFloat(
-                                (
-                                    point
-                                        .elevationM -
-                                    minE
-                                ) /
-                                spanE
-                            ) *
-                            (
-                                size.height -
-                                10
-                            ) -
-                            5
+                    for (index, point) in points.enumerated() {
+                        let x = CGFloat(point.distanceM / maxD) * size.width
+                        let y = size.height
+                            - CGFloat((point.elevationM - minE) / spanE)
+                            * (size.height - 10)
+                            - 5
 
                         if index == 0 {
-
-                            profile.move(
-                                to:
-                                    CGPoint(
-                                        x: x,
-                                        y: y
-                                    )
-                            )
-
+                            profile.move(to: CGPoint(x: x, y: y))
                         } else {
-
-                            profile.addLine(
-                                to:
-                                    CGPoint(
-                                        x: x,
-                                        y: y
-                                    )
-                            )
+                            profile.addLine(to: CGPoint(x: x, y: y))
                         }
                     }
 
-                    context.stroke(
-                        profile,
-                        with:
-                            .color(
-                                .primary
-                            ),
-                        lineWidth: 2
-                    )
+                    context.stroke(profile, with: .color(.primary), lineWidth: 2)
 
-                    let x =
-                        CGFloat(
-                            min(
-                                1,
-                                max(
-                                    0,
-                                    progress
-                                )
-                            )
-                        ) *
-                        size.width
-
-                    var marker =
-                        Path()
-
-                    marker.move(
-                        to:
-                            CGPoint(
-                                x: x,
-                                y: 0
-                            )
-                    )
-
-                    marker.addLine(
-                        to:
-                            CGPoint(
-                                x: x,
-                                y:
-                                    size.height
-                            )
-                    )
-
-                    context.stroke(
-                        marker,
-                        with:
-                            .color(
-                                .red
-                            ),
-                        lineWidth: 2
-                    )
+                    let x = CGFloat(min(1, max(0, progress))) * size.width
+                    var marker = Path()
+                    marker.move(to: CGPoint(x: x, y: 0))
+                    marker.addLine(to: CGPoint(x: x, y: size.height))
+                    context.stroke(marker, with: .color(.red), lineWidth: 2)
                 }
                 .background(
-                    .secondary
-                        .opacity(
-                            0.06
-                        ),
-                    in:
-                        RoundedRectangle(
-                            cornerRadius:
-                                10
-                        )
+                    .secondary.opacity(0.06),
+                    in: RoundedRectangle(cornerRadius: 10)
                 )
             }
         }
