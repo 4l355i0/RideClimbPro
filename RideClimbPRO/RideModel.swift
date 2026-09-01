@@ -47,11 +47,6 @@ final class RideModel: ObservableObject {
     private var resistanceRampDurationS: Double = 0.6
     private var sessionLog: [SessionSample] = []
 
-    // Build 27: longitudinal bicycle dynamics.
-    // This is the actual route speed state; it is not recomputed directly
-    // from cadence on every tick, so inertia is preserved.
-    private var dynamicSpeedMS: Double = 0
-
     // Terrain response / smoothing retained from the validated V1 control path.
     private let maxGradeLookAheadM: Double = 150.0
     private let minResistanceRampDurationS: Double = 0.6
@@ -563,7 +558,6 @@ final class RideModel: ObservableObject {
             currentGearLabel
 
         virtualSpeedKPH = 0
-        dynamicSpeedMS = 0
         targetPowerW = 0
 
         isRiding = false
@@ -595,8 +589,6 @@ final class RideModel: ObservableObject {
     func pauseRide() {
         isRiding = false
         lastTick = nil
-        dynamicSpeedMS = 0
-        virtualSpeedKPH = 0
         status = "Ride paused"
     }
 
@@ -607,7 +599,6 @@ final class RideModel: ObservableObject {
         distanceM = 0
         elapsedSeconds = 0
         virtualSpeedKPH = 0
-        dynamicSpeedMS = 0
         targetPowerW = 0
 
         if let route {
@@ -890,131 +881,9 @@ final class RideModel: ObservableObject {
         )
     }
 
-    // MARK: - Build 27 speed / inertia
-
-    /// Integrates longitudinal speed from real trainer power and road forces.
-    /// A negative grade contributes a downhill accelerating force, so speed
-    /// naturally continues with zero cadence/power instead of dropping to zero.
-    private func integratedSpeedMS(
-        actualPowerW: Int,
-        gradePercent: Double,
-        dt: Double
-    ) -> Double {
-
-        let g = 9.81
-        let mass = max(1.0, totalMassKg)
-        let theta = atan(gradePercent / 100.0)
-        let v = max(0.0, dynamicSpeedMS)
-
-        // Rider/trainer power becomes propulsive force at the rear wheel.
-        // At very low speed the P/v expression is bounded to avoid an
-        // unrealistic launch impulse.
-        let wheelPower =
-            max(0.0, Double(actualPowerW)) *
-            max(0.5, drivetrainEfficiency)
-
-        var driveForce: Double = 0
-        if wheelPower > 0 {
-            // P = F * v becomes singular at v = 0. The previous 1.5 m/s
-            // floor artificially limited drive force so much that low-power
-            // starts on steep climbs could remain stuck at 0 km/h.
-            //
-            // 0.25 m/s is only a numerical launch speed. It allows realistic
-            // low-speed climbing (for example ~50 W in 40x51) while the
-            // normal P/v relation takes over as soon as the bike is moving.
-            let effectiveSpeed =
-                max(
-                    0.25,
-                    v
-                )
-
-            driveForce =
-                wheelPower /
-                effectiveSpeed
-
-            // Limit only the numerical launch impulse, not normal climbing.
-            driveForce =
-                min(
-                    450.0,
-                    driveForce
-                )
-        }
-
-        // Positive uphill grade resists motion; negative/downhill grade
-        // produces a negative "resistance", therefore acceleration.
-        let gravityForce =
-            mass *
-            g *
-            sin(theta)
-
-        let rollingForce =
-            mass *
-            g *
-            crr *
-            cos(theta)
-
-        let aeroForce =
-            0.5 *
-            airDensity *
-            cda *
-            v *
-            v
-
-        var acceleration =
-            (
-                driveForce -
-                gravityForce -
-                rollingForce -
-                aeroForce
-            ) /
-            mass
-
-        // Numerical/comfort bound; still allows strong downhill acceleration.
-        acceleration =
-            min(
-                3.0,
-                max(
-                    -4.0,
-                    acceleration
-                )
-            )
-
-        var next =
-            max(
-                0.0,
-                v + acceleration * dt
-            )
-
-        // If nearly stationary on an uphill, do not allow the route to roll
-        // backwards. On a descent, gravity can launch from rest naturally.
-        if next < 0.03 &&
-            gradePercent >= 0 &&
-            actualPowerW <= 0 {
-
-            next = 0
-        }
-
-        // Sanity cap for an indoor simulation.
-        next =
-            min(
-                35.0,   // 126 km/h
-                next
-            )
-
-        dynamicSpeedMS = next
-        return next
-    }
-
-    /// Cadence/gearing speed retained as a diagnostic/reference only.
-    /// Route progress is driven by integratedSpeedMS().
-    var drivetrainReferenceSpeedKPH: Double {
-        speedKPH(from: 0)
-    }
-
     /// Advances the route and returns the validated V1 resistance command.
     func tick(
         cadenceRPM: Double,
-        actualPowerW: Int,
         now: Date = Date()
     ) -> Double? {
 
@@ -1049,33 +918,20 @@ final class RideModel: ObservableObject {
             return targetResistancePercent
         }
 
-        // Use the terrain at the current position to integrate bicycle
-        // acceleration before advancing the route. This gives real inertia:
-        // on a descent the bike keeps moving even at 0 W.
-        let dynamicsGrade =
-            route.forwardGrade(
-                at: distanceM,
-                lookAheadM:
-                    terrainLookAheadM(
-                        for: route
-                    )
-            )
-
-        let speedMS =
-            integratedSpeedMS(
-                actualPowerW: actualPowerW,
-                gradePercent: dynamicsGrade,
-                dt: dt
-            )
-
         virtualSpeedKPH =
-            speedMS * 3.6
+            speedKPH(
+                from: cadenceRPM
+            )
 
         distanceM =
             min(
                 route.totalDistanceM,
                 distanceM +
-                speedMS * dt
+                (
+                    virtualSpeedKPH /
+                    3.6
+                ) *
+                dt
             )
 
         elapsedSeconds += dt
