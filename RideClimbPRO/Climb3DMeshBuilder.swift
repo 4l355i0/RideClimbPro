@@ -10,10 +10,10 @@ struct Climb3DMeshBuilder {
     let baseHeightM: Double = 8.0
     let centerlineLiftM: Double = 0.10
 
-    // Build 31: short-range visual-only elevation filtering.
-    // This keeps the rendered crest/descent transition close to RideModel
-    // distance while still suppressing small elevation noise.
-    let visualElevationSmoothRadiusM: Double = 8.0
+    // Build 32: exact GPX elevation for the rendered road.
+    // No visual look-ahead / spatial smoothing here: the 3D crest and descent
+    // must occur at exactly the same route distance used by RideModel.
+    let visualElevationSmoothRadiusM: Double = 0.0
 
     private struct ProjectedPoint {
         let distanceM: Double
