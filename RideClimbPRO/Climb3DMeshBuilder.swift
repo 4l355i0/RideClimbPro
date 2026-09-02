@@ -10,10 +10,10 @@ struct Climb3DMeshBuilder {
     let baseHeightM: Double = 8.0
     let centerlineLiftM: Double = 0.10
 
-    // Build 29: visual-only elevation filtering. The RideModel route and all
-    // trainer/virtual-shift calculations remain exactly the validated Build 25
-    // path. Only the rendered Z profile is filtered.
-    let visualElevationSmoothRadiusM: Double = 28.0
+    // Build 31: short-range visual-only elevation filtering.
+    // This keeps the rendered crest/descent transition close to RideModel
+    // distance while still suppressing small elevation noise.
+    let visualElevationSmoothRadiusM: Double = 8.0
 
     private struct ProjectedPoint {
         let distanceM: Double
