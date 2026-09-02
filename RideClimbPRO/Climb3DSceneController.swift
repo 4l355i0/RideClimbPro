@@ -265,10 +265,15 @@ final class Climb3DSceneController {
             (maxFollowTargetLiftM - minFollowTargetLiftM) *
             Float(speedFactor)
 
+        // Build 32: keep the Follow camera on the same terrain side as the
+        // rider. Near a crest the old look-ahead could point the camera into
+        // the descent while RideModel was still on the climb, creating the
+        // impression that 3D had jumped/reset.
         let futureDistance =
-            min(
-                route.totalDistanceM,
-                distanceM + followLookAheadM
+            followTargetDistance(
+                from: distanceM,
+                requestedLookAheadM: followLookAheadM,
+                route: route
             )
 
         let future =
@@ -580,6 +585,64 @@ final class Climb3DSceneController {
 
     func resetCamera() {
         enableFollowMode()
+    }
+
+    /// Returns a camera target ahead of the rider without crossing an
+    /// upcoming climb/descend sign change. The marker itself always remains
+    /// exactly at RideModel.distanceM.
+    private func followTargetDistance(
+        from distanceM: Double,
+        requestedLookAheadM: Double,
+        route: GPXRoute
+    ) -> Double {
+        let start = min(route.totalDistanceM, max(0, distanceM))
+        let requestedEnd =
+            min(
+                route.totalDistanceM,
+                start + max(1.0, requestedLookAheadM)
+            )
+
+        // Use the same current-position grade API used by RideModel.
+        let startGrade = route.grade(at: start, windowM: 10)
+        let deadband = 0.25
+
+        func sign(_ grade: Double) -> Int {
+            if grade > deadband { return 1 }
+            if grade < -deadband { return -1 }
+            return 0
+        }
+
+        let startSign = sign(startGrade)
+
+        // On essentially flat terrain there is no meaningful crest boundary
+        // to protect; use the normal look-ahead.
+        if startSign == 0 {
+            return requestedEnd
+        }
+
+        // Search forward in 1 m increments. As soon as the terrain changes
+        // sign, keep the target just before that boundary. Once RideModel
+        // itself crosses the crest, startSign flips and the camera follows
+        // the descent normally.
+        var probe = start + 1.0
+        while probe < requestedEnd {
+            let probeSign =
+                sign(
+                    route.grade(
+                        at: probe,
+                        windowM: 10
+                    )
+                )
+
+            if probeSign != 0 &&
+                probeSign != startSign {
+                return max(start + 1.0, probe - 1.0)
+            }
+
+            probe += 1.0
+        }
+
+        return requestedEnd
     }
 
     private func meshPosition(atDistanceM distanceM: Double) -> Climb3DVertex {
