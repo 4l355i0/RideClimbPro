@@ -13,6 +13,8 @@ struct RideClimbPRO3DView: UIViewRepresentable {
         let view = SCNView()
         view.scene = sceneController.scene
         view.backgroundColor = .systemBackground
+        // SceneController enables touch rotation/pinch zoom in Overview and
+        // disables it again when Follow mode is active.
         view.allowsCameraControl = false
         view.autoenablesDefaultLighting = false
         view.antialiasingMode = .multisampling4X
