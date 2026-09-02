@@ -21,15 +21,20 @@ final class Climb3DSceneController {
 
     private var currentDistanceM: Double = 0
     private var lastDistanceUpdateAt: Date?
+    private var visualSpeedKPH: Double = 0
     private var followMode = false
     private var showingOverview = true
 
-    // Follow camera: rider remains in the lower/central part of the frame,
-    // while the camera looks well ahead to preserve road perspective.
-    private let cameraBehindM: Double = 11
-    private let cameraHeightM: Float = 5.2
-    private let followLookAheadM: Double = 24
-    private let followTargetLiftM: Float = 0.7
+    // Follow camera: keep the marker higher on screen at low speed, then
+    // progressively open the view as speed increases.
+    private let minCameraBehindM: Double = 8.5
+    private let maxCameraBehindM: Double = 11.0
+    private let minFollowLookAheadM: Double = 12.0
+    private let maxFollowLookAheadM: Double = 24.0
+    private let minCameraHeightM: Float = 4.7
+    private let maxCameraHeightM: Float = 5.2
+    private let minFollowTargetLiftM: Float = 0.15
+    private let maxFollowTargetLiftM: Float = 0.70
 
     init() {
         let markerGeometry = SCNSphere(radius: 0.52)
@@ -109,6 +114,7 @@ final class Climb3DSceneController {
 
         currentDistanceM = 0
         lastDistanceUpdateAt = nil
+        visualSpeedKPH = 0
         followMode = false
         showingOverview = true
         updateMarker(distanceM: 0, animated: false)
@@ -126,9 +132,19 @@ final class Climb3DSceneController {
         let now = Date()
         let animationDuration: CFTimeInterval
         if let lastDistanceUpdateAt {
-            animationDuration = min(0.80, max(0.12, now.timeIntervalSince(lastDistanceUpdateAt)))
+            let deltaT = max(0.001, now.timeIntervalSince(lastDistanceUpdateAt))
+            animationDuration = min(0.80, max(0.12, deltaT))
+
+            let deltaM = max(0, distanceM - previousDistance)
+            let instantaneousKPH = (deltaM / deltaT) * 3.6
+            if instantaneousKPH.isFinite {
+                visualSpeedKPH =
+                    visualSpeedKPH * 0.70 +
+                    min(80.0, instantaneousKPH) * 0.30
+            }
         } else {
             animationDuration = 0.24
+            visualSpeedKPH = 0
         }
         lastDistanceUpdateAt = now
 
@@ -219,6 +235,35 @@ final class Climb3DSceneController {
             meshPosition(
                 atDistanceM: distanceM
             )
+
+        let speedFactor =
+            min(
+                1.0,
+                max(
+                    0.0,
+                    visualSpeedKPH / 25.0
+                )
+            )
+
+        let followLookAheadM =
+            minFollowLookAheadM +
+            (maxFollowLookAheadM - minFollowLookAheadM) *
+            speedFactor
+
+        let cameraBehindM =
+            minCameraBehindM +
+            (maxCameraBehindM - minCameraBehindM) *
+            speedFactor
+
+        let cameraHeightM =
+            minCameraHeightM +
+            (maxCameraHeightM - minCameraHeightM) *
+            Float(speedFactor)
+
+        let followTargetLiftM =
+            minFollowTargetLiftM +
+            (maxFollowTargetLiftM - minFollowTargetLiftM) *
+            Float(speedFactor)
 
         let futureDistance =
             min(
@@ -364,6 +409,7 @@ final class Climb3DSceneController {
 
         showingOverview = true
         followMode = false
+        view?.allowsCameraControl = true
 
         var minX = Float.greatestFiniteMagnitude
         var maxX = -Float.greatestFiniteMagnitude
@@ -391,57 +437,93 @@ final class Climb3DSceneController {
         let spanX =
             Double(maxX - minX)
 
-        let spanZ =
-            Double(maxZ - minZ)
-
         let spanY =
             Double(maxY - minY)
 
-        let horizontalSpan =
+        let spanZ =
+            Double(maxZ - minZ)
+
+        // Fit the complete 3D bounding box to the actual camera FOV/aspect.
+        let halfX = max(1.0, spanX / 2.0)
+        let halfY = max(1.0, spanY / 2.0)
+        let halfZ = max(1.0, spanZ / 2.0)
+        let boundingRadius =
+            sqrt(
+                halfX * halfX +
+                halfY * halfY +
+                halfZ * halfZ
+            )
+
+        let verticalFOVDegrees =
+            Double(
+                cameraNode.camera?.fieldOfView ?? 66
+            )
+
+        let verticalHalfFOV =
             max(
-                20.0,
-                sqrt(
-                    spanX * spanX +
-                    spanZ * spanZ
+                0.20,
+                verticalFOVDegrees *
+                .pi / 360.0
+            )
+
+        let aspect =
+            max(
+                0.45,
+                min(
+                    2.2,
+                    Double(
+                        (view?.bounds.width ?? 3) /
+                        max(1, view?.bounds.height ?? 4)
+                    )
                 )
             )
 
-        // Distance derived from route footprint so short and long climbs both
-        // fit. Extra height gives the desired "model from afar" perspective.
-        let distance =
-            Float(
-                max(
-                    35.0,
-                    horizontalSpan * 0.90
+        let horizontalHalfFOV =
+            atan(
+                tan(verticalHalfFOV) *
+                aspect
+            )
+
+        let limitingHalfFOV =
+            max(
+                0.20,
+                min(
+                    verticalHalfFOV,
+                    horizontalHalfFOV
                 )
             )
 
-        let height =
-            Float(
-                max(
-                    18.0,
-                    horizontalSpan * 0.42 +
-                    spanY * 0.55
-                )
+        let fitDistance =
+            max(
+                25.0,
+                boundingRadius /
+                tan(limitingHalfFOV) *
+                1.18
             )
+
+        // Diagonal elevated overview, aimed at the exact route centre.
+        var dirX = -0.62
+        var dirY = 0.56
+        var dirZ = 0.62
+        let dirLength =
+            sqrt(
+                dirX * dirX +
+                dirY * dirY +
+                dirZ * dirZ
+            )
+
+        dirX /= dirLength
+        dirY /= dirLength
+        dirZ /= dirLength
 
         let cameraPosition =
             SCNVector3(
-                center.x -
-                    distance * 0.72,
-                center.y +
-                    height,
-                center.z +
-                    distance * 0.72
+                center.x + Float(dirX * fitDistance),
+                center.y + Float(dirY * fitDistance),
+                center.z + Float(dirZ * fitDistance)
             )
 
-        let target =
-            SCNVector3(
-                center.x,
-                center.y +
-                    Float(spanY * 0.08),
-                center.z
-            )
+        let target = center
 
         let apply = {
             self.cameraNode.position =
@@ -488,6 +570,7 @@ final class Climb3DSceneController {
     func enableFollowMode() {
         showingOverview = false
         followMode = true
+        view?.allowsCameraControl = false
 
         updateFollowCamera(
             distanceM: currentDistanceM,
@@ -586,4 +669,3 @@ final class Climb3DSceneController {
         return node
     }
 }
-
