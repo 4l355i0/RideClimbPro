@@ -73,13 +73,13 @@ enum GPXParserError: Error {
     case noTrackPoints
 }
 
-/// Build 40 GPX preprocessing
+/// Build 42 GPX preprocessing — DEM-backed elevation
 ///
 /// The imported GPX is treated as a GUIDE, not as geometry that must be reproduced
 /// point-for-point. The output preserves the real climb structure:
 /// - primary climb length
 /// - number/order/location of major hairpins
-/// - local elevation/grade profile
+/// - road geometry from the GPX guide
 /// - total start/end elevation difference
 ///
 /// It removes the two things that make dirty GPX files look bad in 3D:
@@ -87,8 +87,9 @@ enum GPXParserError: Error {
 /// - noisy elevation inside each road section
 ///
 /// Plan-view geometry is kept on the original GPX polyline and resampled at 5 m.
-/// Elevation is robustly denoised with a spatial median filter followed by a
-/// Savitzky-Golay-style local quadratic fit, preserving real grade changes.
+/// Elevation is reconstructed from the EU-DEM 25 m terrain database using
+/// latitude/longitude, then aligned to the GPX start/end elevation. The GPX
+/// altitude samples are therefore not used to define the local grade profile.
 final class GPXParser: NSObject, XMLParserDelegate {
     private struct RawPoint {
         let lat: Double
@@ -137,14 +138,15 @@ final class GPXParser: NSObject, XMLParserDelegate {
         let resampled = resample(source, every: resampleStepM)
         guard resampled.count >= 2 else { throw GPXParserError.noTrackPoints }
 
-        // Elevation must retain the REAL local profile. Hairpins are geometric
-        // landmarks only; they must never be used as elevation anchors because
-        // routes with few/no hairpins would collapse to one constant grade.
-        // Use a spatial local-linear smoother instead: it removes GPS altitude
-        // noise while preserving ramps and genuine grade changes.
-        let regularized = regularizeElevationMedianSavitzkyGolay(resampled)
+        // B42: do not infer the road profile from dirty GPX altitude samples.
+        // Reconstruct elevation from a DEM using the cleaned lat/lon geometry.
+        // For this test build we use OpenTopoData EU-DEM 25 m (Europe).
+        // DEM samples are requested every 10 m, interpolated back onto the 5 m
+        // route, and linearly aligned so the original start/end elevations and
+        // therefore the net climb remain exact.
+        let demBacked = try reconstructElevationFromDEM(resampled)
 
-        return GPXRoute(points: regularized)
+        return GPXRoute(points: demBacked)
     }
 
     // MARK: - Raw cleanup / route construction
@@ -432,6 +434,182 @@ final class GPXParser: NSObject, XMLParserDelegate {
         while a > .pi { a -= 2 * .pi }
         while a < -.pi { a += 2 * .pi }
         return a
+    }
+
+
+    // MARK: - B42 DEM-backed elevation
+
+    /// Test implementation using OpenTopoData's public EU-DEM 25 m dataset.
+    /// The public endpoint is suitable for testing and has rate limits; a
+    /// production build should use a dedicated/paid endpoint or self-hosted DEM.
+    private func reconstructElevationFromDEM(_ source: [RoutePoint]) throws -> [RoutePoint] {
+        guard source.count >= 2, let last = source.last, last.distanceM > 0 else { return source }
+
+        // Query at the native DEM scale. Asking for 5 m points from a 25 m DEM
+        // adds no information and only consumes API quota.
+        let demStepM = 10.0
+        var samplePoints: [RoutePoint] = []
+        var d = 0.0
+        while d < last.distanceM {
+            samplePoints.append(interpolatedPoint(in: source, at: d))
+            d += demStepM
+        }
+        samplePoints.append(interpolatedPoint(in: source, at: last.distanceM))
+
+        var demElevations: [Double] = []
+        demElevations.reserveCapacity(samplePoints.count)
+
+        let batchSize = 100
+        var start = 0
+        while start < samplePoints.count {
+            let end = min(start + batchSize, samplePoints.count)
+            let batch = Array(samplePoints[start..<end])
+            if start > 0 { Thread.sleep(forTimeInterval: 1.05) } // public API: max 1 request/s
+            let values = try fetchEUDEMElevations(batch)
+            guard values.count == batch.count else {
+                throw NSError(
+                    domain: "RideClimb.DEM",
+                    code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "DEM returned an incomplete elevation batch"]
+                )
+            }
+            demElevations.append(contentsOf: values)
+            start = end
+        }
+
+        guard demElevations.count == samplePoints.count else {
+            throw NSError(
+                domain: "RideClimb.DEM",
+                code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "DEM elevation count mismatch"]
+            )
+        }
+
+        // A tiny 3-sample median suppresses isolated raster/cell artefacts without
+        // flattening sustained changes of slope. At 10 m spacing it sees ~30 m.
+        let cleanDEM = median3(demElevations)
+
+        // Interpolate DEM elevations onto every 5 m route point.
+        var out: [RoutePoint] = []
+        out.reserveCapacity(source.count)
+        var j = 0
+        for p in source {
+            while j + 1 < samplePoints.count && samplePoints[j + 1].distanceM < p.distanceM {
+                j += 1
+            }
+
+            let z: Double
+            if j + 1 >= samplePoints.count {
+                z = cleanDEM.last ?? p.elevationM
+            } else {
+                let a = samplePoints[j]
+                let b = samplePoints[j + 1]
+                let span = max(0.001, b.distanceM - a.distanceM)
+                let t = min(1.0, max(0.0, (p.distanceM - a.distanceM) / span))
+                z = cleanDEM[j] + (cleanDEM[j + 1] - cleanDEM[j]) * t
+            }
+
+            out.append(RoutePoint(
+                distanceM: p.distanceM,
+                elevationM: z,
+                latitude: p.latitude,
+                longitude: p.longitude
+            ))
+        }
+
+        // DEM absolute datum/road-vs-terrain offsets can differ by several metres.
+        // Preserve the GPX's trusted boundary conditions and net elevation change
+        // without reintroducing any of its local noisy altitude samples.
+        guard let outLast = out.last else { return source }
+        let startError = source[0].elevationM - out[0].elevationM
+        let endError = source[source.count - 1].elevationM - outLast.elevationM
+        let span = max(1.0, last.distanceM)
+
+        for i in out.indices {
+            let t = out[i].distanceM / span
+            let correction = startError + (endError - startError) * t
+            out[i] = RoutePoint(
+                distanceM: out[i].distanceM,
+                elevationM: out[i].elevationM + correction,
+                latitude: out[i].latitude,
+                longitude: out[i].longitude
+            )
+        }
+
+        return out
+    }
+
+    private func fetchEUDEMElevations(_ points: [RoutePoint]) throws -> [Double] {
+        guard !points.isEmpty else { return [] }
+
+        let locations = points.map {
+            String(format: "%.6f,%.6f", locale: Locale(identifier: "en_US_POSIX"), $0.latitude, $0.longitude)
+        }.joined(separator: "|")
+
+        var components = URLComponents(string: "https://api.opentopodata.org/v1/eudem25m")!
+        components.queryItems = [
+            URLQueryItem(name: "locations", value: locations),
+            URLQueryItem(name: "interpolation", value: "cubic")
+        ]
+
+        guard let url = components.url else {
+            throw NSError(domain: "RideClimb.DEM", code: 4, userInfo: [NSLocalizedDescriptionKey: "Invalid DEM request URL"])
+        }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 20
+        request.setValue("RideClimbPRO/1.0", forHTTPHeaderField: "User-Agent")
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var responseData: Data?
+        var responseError: Error?
+        var statusCode: Int?
+
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            responseData = data
+            responseError = error
+            statusCode = (response as? HTTPURLResponse)?.statusCode
+            semaphore.signal()
+        }.resume()
+
+        let wait = semaphore.wait(timeout: .now() + 25)
+        if wait == .timedOut {
+            throw NSError(domain: "RideClimb.DEM", code: 5, userInfo: [NSLocalizedDescriptionKey: "DEM request timed out"])
+        }
+        if let responseError { throw responseError }
+        guard statusCode == 200, let data = responseData else {
+            throw NSError(
+                domain: "RideClimb.DEM",
+                code: statusCode ?? 6,
+                userInfo: [NSLocalizedDescriptionKey: "DEM service unavailable (HTTP \(statusCode ?? 0))"]
+            )
+        }
+
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let status = root["status"] as? String, status == "OK",
+              let results = root["results"] as? [[String: Any]] else {
+            throw NSError(domain: "RideClimb.DEM", code: 7, userInfo: [NSLocalizedDescriptionKey: "Invalid DEM response"])
+        }
+
+        var values: [Double] = []
+        values.reserveCapacity(results.count)
+        for item in results {
+            guard let elevation = item["elevation"] as? NSNumber else {
+                throw NSError(domain: "RideClimb.DEM", code: 8, userInfo: [NSLocalizedDescriptionKey: "DEM has no elevation for part of this route"])
+            }
+            values.append(elevation.doubleValue)
+        }
+        return values
+    }
+
+    private func median3(_ values: [Double]) -> [Double] {
+        guard values.count >= 3 else { return values }
+        var out = values
+        for i in 1..<(values.count - 1) {
+            let trio = [values[i - 1], values[i], values[i + 1]].sorted()
+            out[i] = trio[1]
+        }
+        return out
     }
 
     // MARK: - Elevation regularization: robust median + Savitzky-Golay style fit
