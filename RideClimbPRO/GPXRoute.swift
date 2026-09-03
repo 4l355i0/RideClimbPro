@@ -271,6 +271,19 @@ final class GPXParser: NSObject, XMLParserDelegate {
         return cropped.count >= 2 ? cropped : source
     }
 
+    /// Forward grade helper used during preprocessing before a GPXRoute exists.
+    private func forwardGrade(in source: [RoutePoint], at distanceM: Double, lookAheadM: Double) -> Double {
+        guard source.count >= 2, let last = source.last else { return 0 }
+
+        let start = min(max(distanceM, 0), last.distanceM)
+        let end = min(last.distanceM, start + max(0, lookAheadM))
+        guard end - start >= 2 else { return 0 }
+
+        let z0 = interpolatedPoint(in: source, at: start).elevationM
+        let z1 = interpolatedPoint(in: source, at: end).elevationM
+        return 100.0 * (z1 - z0) / (end - start)
+    }
+
     // MARK: - 5 m resampling along original polyline
 
     private func resample(_ source: [RoutePoint], every stepM: Double) -> [RoutePoint] {
@@ -639,5 +652,4 @@ final class GPXParser: NSObject, XMLParserDelegate {
         textBuffer = ""
     }
 }
-
 
