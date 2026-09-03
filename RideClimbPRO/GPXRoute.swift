@@ -61,8 +61,6 @@ struct GPXRoute {
         return 100 * (elevation(at: b) - elevation(at: a)) / (b - a)
     }
 
-    /// RideControl-inspired terrain grade: compare the current elevation with
-    /// a point ahead on the route, rather than differentiating adjacent GPX points.
     func forwardGrade(at distanceM: Double, lookAheadM: Double) -> Double {
         let start = min(max(distanceM, 0), totalDistanceM)
         let end = min(totalDistanceM, start + max(0, lookAheadM))
@@ -75,323 +73,400 @@ enum GPXParserError: Error {
     case noTrackPoints
 }
 
+/// Build 37 GPX preprocessing
+///
+/// The imported GPX is treated as a GUIDE, not as geometry that must be reproduced
+/// point-for-point. The output preserves the real climb structure:
+/// - primary climb length
+/// - number/order/location of major hairpins
+/// - elevation change of every inter-hairpin section
+/// - total start/end elevation difference
+///
+/// It removes the two things that make dirty GPX files look bad in 3D:
+/// - irregular point spacing
+/// - noisy elevation inside each road section
+///
+/// Plan-view geometry is kept on the original GPX polyline and resampled at 5 m.
+/// Elevation is rebuilt piecewise-linearly between detected hairpins, exactly as in
+/// the successful manually regularized Alpe d'Huez test.
 final class GPXParser: NSObject, XMLParserDelegate {
-    private typealias RawPoint = (lat: Double, lon: Double, ele: Double)
+    private struct RawPoint {
+        let lat: Double
+        let lon: Double
+        let ele: Double
+    }
 
-    private var points: [RawPoint] = []
+    private var rawPoints: [RawPoint] = []
     private var currentLat: Double?
     private var currentLon: Double?
     private var currentEle: Double?
-    private var currentElement = ""
     private var textBuffer = ""
 
-    // Pre-processing constants. Horizontal geometry is NEVER averaged.
     private let resampleStepM = 5.0
-    private let duplicateThresholdM = 0.50
-    private let elevationSmoothRadiusM = 25.0
+    private let minimumRawSpacingM = 0.50
+
+    // Major-hairpin detector. 30 m before/after gives a stable road heading and
+    // rejects normal bends; 90° selects true switchbacks. Nearby candidates are
+    // clustered so one physical hairpin becomes one anchor.
+    private let hairpinHeadingWindowM = 30.0
+    private let hairpinMinimumTurnDeg = 90.0
+    private let hairpinClusterM = 70.0
 
     func parse(data: Data) throws -> GPXRoute {
-        points.removeAll()
+        rawPoints.removeAll(keepingCapacity: true)
 
         let parser = XMLParser(data: data)
         parser.delegate = self
 
-        guard parser.parse(), points.count >= 2 else {
+        guard parser.parse(), rawPoints.count >= 2 else {
             throw parser.parserError ?? GPXParserError.noTrackPoints
         }
 
-        // 1) Remove only exact/near duplicates. Do not smooth lat/lon.
-        var cleaned = removeNearDuplicates(points)
+        let cleaned = removeNearDuplicates(rawPoints)
         guard cleaned.count >= 2 else { throw GPXParserError.noTrackPoints }
 
-        // 2) For climb GPXs containing a long flat/approach section, cut only that
-        //    leading non-climb part before the real sustained ascent starts.
-        //    This reproduces the behaviour of the manually regularised Alpe file:
-        //    the actual climb geometry is untouched.
-        cleaned = trimLeadingApproachIfNeeded(cleaned)
-        guard cleaned.count >= 2 else { throw GPXParserError.noTrackPoints }
+        var source = buildRoute(cleaned)
+        guard source.count >= 2 else { throw GPXParserError.noTrackPoints }
 
-        // 3) Build exact cumulative distance along the retained original polyline.
-        let source = buildRoutePoints(cleaned)
+        // If the file contains a flat/irregular approach before a sustained climb,
+        // remove only that approach. If no unambiguous climb start exists, keep all.
+        source = trimToPrimaryClimbIfUnambiguous(source)
 
-        // 4) Resample every ~5 m ALONG that same polyline. No XY smoothing.
-        var resampled = resample(source, every: resampleStepM)
+        // Geometry: follow the original GPX polyline, but with regular 5 m spacing.
+        // No Douglas-Peucker and no lat/lon moving average: genuine hairpins remain.
+        let resampled = resample(source, every: resampleStepM)
+        guard resampled.count >= 2 else { throw GPXParserError.noTrackPoints }
 
-        // 5) Recalculate distance from the resulting lat/lon geometry so that
-        //    distanceM, 2D physics and 3D use exactly the same spatial reference.
-        resampled = recalculateDistances(resampled)
+        // Detect the major switchbacks and use them as hard elevation anchors.
+        let hairpins = detectHairpins(in: resampled)
+        let anchors = normalizedAnchors(hairpins, pointCount: resampled.count)
 
-        // 6) Smooth elevation only, in metres of route distance.
-        let finalPoints = smoothElevation(resampled, radiusM: elevationSmoothRadiusM)
+        // Elevation: rebuild every inter-hairpin road section as one clean ramp,
+        // retaining that section's original endpoint elevations. This preserves
+        // average grade per section and removes vertical GPS noise/spikes.
+        let regularized = rebuildElevationBySegments(resampled, anchors: anchors)
 
-        guard finalPoints.count >= 2 else { throw GPXParserError.noTrackPoints }
-        return GPXRoute(points: finalPoints)
+        return GPXRoute(points: regularized)
     }
 
-    // MARK: - Pre-processing
+    // MARK: - Raw cleanup / route construction
 
     private func removeNearDuplicates(_ source: [RawPoint]) -> [RawPoint] {
-        guard let first = source.first else { return [] }
-        var result: [RawPoint] = [first]
+        guard source.count >= 2 else { return source }
+
+        var result: [RawPoint] = [source[0]]
         result.reserveCapacity(source.count)
 
         for point in source.dropFirst() {
-            guard let last = result.last else { continue }
-            if distanceM(last.lat, last.lon, point.lat, point.lon) >= duplicateThresholdM {
+            guard let last = result.last else {
+                result.append(point)
+                continue
+            }
+
+            let a = CLLocation(latitude: last.lat, longitude: last.lon)
+            let b = CLLocation(latitude: point.lat, longitude: point.lon)
+            if a.distance(from: b) >= minimumRawSpacingM {
                 result.append(point)
             }
         }
 
-        if let sourceLast = source.last,
-           let resultLast = result.last,
-           (sourceLast.lat != resultLast.lat || sourceLast.lon != resultLast.lon) {
-            result.append(sourceLast)
+        if let final = source.last,
+           let last = result.last,
+           (final.lat != last.lat || final.lon != last.lon) {
+            result.append(final)
         }
+
         return result
     }
 
-    /// Detect and remove a long, nearly-flat leading approach only when the file
-    /// clearly looks like a climb: long route, large elevation range, flat first km,
-    /// then a sustained steep section. Otherwise the GPX is left untouched.
-    private func trimLeadingApproachIfNeeded(_ source: [RawPoint]) -> [RawPoint] {
-        let route = buildRoutePoints(source)
-        guard route.count >= 2,
-              let last = route.last,
-              last.distanceM >= 5_000 else { return source }
+    private func buildRoute(_ source: [RawPoint]) -> [RoutePoint] {
+        guard !source.isEmpty else { return [] }
 
-        let elevations = route.map(\.elevationM)
-        guard let minEle = elevations.min(), let maxEle = elevations.max(),
-              maxEle - minEle >= 300 else { return source }
+        var result: [RoutePoint] = []
+        result.reserveCapacity(source.count)
 
-        let firstKm = min(1_000.0, last.distanceM)
-        let firstKmGrade = abs(100.0 * (interpolatedElevation(route, at: firstKm) - route[0].elevationM) / max(1.0, firstKm))
-        guard firstKmGrade <= 1.5 else { return source }
+        var cumulative = 0.0
+        result.append(
+            RoutePoint(
+                distanceM: 0,
+                elevationM: source[0].ele,
+                latitude: source[0].lat,
+                longitude: source[0].lon
+            )
+        )
 
-        // 300 m at >=7.4% is deliberately conservative: it avoids trimming normal
-        // rolling starts, but finds the actual Alpe ascent at ~1.91 km in this GPX.
-        let windowM = 300.0
-        let thresholdPct = 7.4
-        var candidate: Double?
+        for i in 1..<source.count {
+            let a = CLLocation(latitude: source[i - 1].lat, longitude: source[i - 1].lon)
+            let b = CLLocation(latitude: source[i].lat, longitude: source[i].lon)
+            cumulative += a.distance(from: b)
+
+            result.append(
+                RoutePoint(
+                    distanceM: cumulative,
+                    elevationM: source[i].ele,
+                    latitude: source[i].lat,
+                    longitude: source[i].lon
+                )
+            )
+        }
+
+        return result
+    }
+
+    // MARK: - Primary climb start
+
+    /// Detect a clearly sustained uphill start. The 300/500 m dual test avoids
+    /// triggering on a short ramp in an approach. Thresholds were chosen so the
+    /// supplied Alpe file starts at ~13.8 km remaining, matching the known-good
+    /// regularized test instead of the dirty 15.7 km approach-inclusive file.
+    private func trimToPrimaryClimbIfUnambiguous(_ source: [RoutePoint]) -> [RoutePoint] {
+        guard source.count >= 2,
+              let last = source.last,
+              last.distanceM >= 3_000 else {
+            return source
+        }
+
+        let total = last.distanceM
+        let netRise = source.last!.elevationM - source.first!.elevationM
+        guard netRise > 150 else { return source }
+
+        let searchLimit = min(total * 0.35, total - 500)
         var d = 0.0
-        while d + windowM <= last.distanceM {
-            let rise = interpolatedElevation(route, at: d + windowM) - interpolatedElevation(route, at: d)
-            let grade = 100.0 * rise / windowM
-            if grade >= thresholdPct {
-                candidate = d
+        var startDistance: Double?
+
+        while d <= searchLimit {
+            let g300 = forwardGrade(in: source, at: d, lookAheadM: 300)
+            let g500 = forwardGrade(in: source, at: d, lookAheadM: 500)
+
+            if g300 >= 6.0 && g500 >= 8.0 {
+                startDistance = d
                 break
             }
             d += 5.0
         }
 
-        guard let cutDistance = candidate, cutDistance >= 500 else { return source }
+        guard let startDistance, startDistance > 100 else { return source }
 
-        // Build an interpolated first point exactly at the cut distance, then append
-        // untouched original points after it. This preserves every real hairpin.
-        guard let firstCut = interpolatedRawPoint(sourceRoute: route, at: cutDistance) else { return source }
+        // Start exactly on the detected route distance, then rebase distance to 0.
+        var cropped: [RoutePoint] = []
+        let first = interpolatedPoint(in: source, at: startDistance)
+        cropped.append(
+            RoutePoint(
+                distanceM: 0,
+                elevationM: first.elevationM,
+                latitude: first.latitude,
+                longitude: first.longitude
+            )
+        )
 
-        var output: [RawPoint] = [firstCut]
-        for point in source {
-            let loc = CLLocation(latitude: point.lat, longitude: point.lon)
-            let cutLoc = CLLocation(latitude: firstCut.lat, longitude: firstCut.lon)
-            // Do not use radial distance to decide ordering. Find source index below.
-            _ = loc
-            _ = cutLoc
+        for p in source where p.distanceM > startDistance {
+            cropped.append(
+                RoutePoint(
+                    distanceM: p.distanceM - startDistance,
+                    elevationM: p.elevationM,
+                    latitude: p.latitude,
+                    longitude: p.longitude
+                )
+            )
         }
 
-        // Find the first original point strictly after cutDistance using route distances.
-        if let index = route.firstIndex(where: { $0.distanceM > cutDistance }) {
-            for i in index..<source.count {
-                output.append(source[i])
-            }
-        }
-
-        return output.count >= 2 ? output : source
+        return cropped.count >= 2 ? cropped : source
     }
 
-    private func buildRoutePoints(_ source: [RawPoint]) -> [RoutePoint] {
-        guard let first = source.first else { return [] }
-
-        var result: [RoutePoint] = []
-        result.reserveCapacity(source.count)
-        var cumulative = 0.0
-
-        result.append(RoutePoint(
-            distanceM: 0,
-            elevationM: first.ele,
-            latitude: first.lat,
-            longitude: first.lon
-        ))
-
-        for index in 1..<source.count {
-            let previous = source[index - 1]
-            let current = source[index]
-            cumulative += distanceM(previous.lat, previous.lon, current.lat, current.lon)
-            result.append(RoutePoint(
-                distanceM: cumulative,
-                elevationM: current.ele,
-                latitude: current.lat,
-                longitude: current.lon
-            ))
-        }
-        return result
-    }
+    // MARK: - 5 m resampling along original polyline
 
     private func resample(_ source: [RoutePoint], every stepM: Double) -> [RoutePoint] {
-        guard source.count >= 2, let last = source.last, last.distanceM > 0 else { return source }
+        guard source.count >= 2,
+              let last = source.last,
+              last.distanceM > 0 else {
+            return source
+        }
 
         var result: [RoutePoint] = []
         result.reserveCapacity(Int(last.distanceM / stepM) + 2)
-        var target = 0.0
-        var segment = 0
 
-        while target <= last.distanceM {
-            while segment + 1 < source.count && source[segment + 1].distanceM < target {
-                segment += 1
-            }
-
-            let next = min(source.count - 1, segment + 1)
-            let a = source[segment]
-            let b = source[next]
-            let span = max(0.001, b.distanceM - a.distanceM)
-            let t = min(1.0, max(0.0, (target - a.distanceM) / span))
-
-            result.append(RoutePoint(
-                distanceM: target,
-                elevationM: a.elevationM + (b.elevationM - a.elevationM) * t,
-                latitude: a.latitude + (b.latitude - a.latitude) * t,
-                longitude: a.longitude + (b.longitude - a.longitude) * t
-            ))
-            target += stepM
+        var d = 0.0
+        while d < last.distanceM {
+            result.append(interpolatedPoint(in: source, at: d))
+            d += stepM
         }
 
-        if let resultLast = result.last, last.distanceM - resultLast.distanceM > 0.1 {
-            result.append(last)
-        }
+        result.append(interpolatedPoint(in: source, at: last.distanceM))
         return result
     }
 
-    private func recalculateDistances(_ source: [RoutePoint]) -> [RoutePoint] {
-        guard let first = source.first else { return [] }
-        var result: [RoutePoint] = []
-        result.reserveCapacity(source.count)
-        var cumulative = 0.0
-
-        result.append(RoutePoint(
-            distanceM: 0,
-            elevationM: first.elevationM,
-            latitude: first.latitude,
-            longitude: first.longitude
-        ))
-
-        for index in 1..<source.count {
-            let a = source[index - 1]
-            let b = source[index]
-            cumulative += distanceM(a.latitude, a.longitude, b.latitude, b.longitude)
-            result.append(RoutePoint(
-                distanceM: cumulative,
-                elevationM: b.elevationM,
-                latitude: b.latitude,
-                longitude: b.longitude
-            ))
-        }
-        return result
-    }
-
-    private func smoothElevation(_ source: [RoutePoint], radiusM: Double) -> [RoutePoint] {
-        guard source.count >= 3 else { return source }
-        var result: [RoutePoint] = []
-        result.reserveCapacity(source.count)
-
-        var left = 0
-        var right = 0
-
-        for i in source.indices {
-            let center = source[i].distanceM
-            while left < i && source[left].distanceM < center - radiusM { left += 1 }
-            if right < i { right = i }
-            while right + 1 < source.count && source[right + 1].distanceM <= center + radiusM { right += 1 }
-
-            var weighted = 0.0
-            var weightSum = 0.0
-            for j in left...right {
-                let delta = abs(source[j].distanceM - center)
-                let weight = max(0.0, radiusM - delta) + 1.0
-                weighted += source[j].elevationM * weight
-                weightSum += weight
-            }
-
-            let smoothed = weightSum > 0 ? weighted / weightSum : source[i].elevationM
-            result.append(RoutePoint(
-                distanceM: source[i].distanceM,
-                elevationM: smoothed,
-                latitude: source[i].latitude,
-                longitude: source[i].longitude
-            ))
+    private func interpolatedPoint(in source: [RoutePoint], at distanceM: Double) -> RoutePoint {
+        guard !source.isEmpty else {
+            return RoutePoint(distanceM: 0, elevationM: 0, latitude: 0, longitude: 0)
         }
 
-        // Preserve exact start/end elevations.
-        if !result.isEmpty {
-            result[0] = RoutePoint(
-                distanceM: result[0].distanceM,
-                elevationM: source[0].elevationM,
-                latitude: result[0].latitude,
-                longitude: result[0].longitude
-            )
-            let last = result.count - 1
-            result[last] = RoutePoint(
-                distanceM: result[last].distanceM,
-                elevationM: source[last].elevationM,
-                latitude: result[last].latitude,
-                longitude: result[last].longitude
-            )
-        }
-        return result
-    }
+        let total = source.last?.distanceM ?? 0
+        let target = min(total, max(0, distanceM))
 
-    private func interpolatedElevation(_ route: [RoutePoint], at distance: Double) -> Double {
-        guard !route.isEmpty else { return 0 }
-        let d = min(max(distance, 0), route.last?.distanceM ?? 0)
         var low = 0
-        var high = route.count - 1
+        var high = source.count - 1
         while low < high {
             let mid = (low + high) / 2
-            if route[mid].distanceM < d { low = mid + 1 } else { high = mid }
+            if source[mid].distanceM < target {
+                low = mid + 1
+            } else {
+                high = mid
+            }
         }
-        if low == 0 { return route[0].elevationM }
-        let a = route[low - 1]
-        let b = route[low]
-        let span = max(0.001, b.distanceM - a.distanceM)
-        let t = (d - a.distanceM) / span
-        return a.elevationM + (b.elevationM - a.elevationM) * t
-    }
 
-    private func interpolatedRawPoint(sourceRoute route: [RoutePoint], at distance: Double) -> RawPoint? {
-        guard !route.isEmpty else { return nil }
-        let d = min(max(distance, 0), route.last?.distanceM ?? 0)
-        var low = 0
-        var high = route.count - 1
-        while low < high {
-            let mid = (low + high) / 2
-            if route[mid].distanceM < d { low = mid + 1 } else { high = mid }
-        }
         if low == 0 {
-            let p = route[0]
-            return (p.latitude, p.longitude, p.elevationM)
+            let p = source[0]
+            return RoutePoint(
+                distanceM: target,
+                elevationM: p.elevationM,
+                latitude: p.latitude,
+                longitude: p.longitude
+            )
         }
-        let a = route[low - 1]
-        let b = route[low]
+
+        let a = source[low - 1]
+        let b = source[low]
         let span = max(0.001, b.distanceM - a.distanceM)
-        let t = (d - a.distanceM) / span
-        return (
-            a.latitude + (b.latitude - a.latitude) * t,
-            a.longitude + (b.longitude - a.longitude) * t,
-            a.elevationM + (b.elevationM - a.elevationM) * t
+        let t = min(1, max(0, (target - a.distanceM) / span))
+
+        return RoutePoint(
+            distanceM: target,
+            elevationM: a.elevationM + (b.elevationM - a.elevationM) * t,
+            latitude: a.latitude + (b.latitude - a.latitude) * t,
+            longitude: a.longitude + (b.longitude - a.longitude) * t
         )
     }
 
-    private func distanceM(_ lat1: Double, _ lon1: Double, _ lat2: Double, _ lon2: Double) -> Double {
-        CLLocation(latitude: lat1, longitude: lon1)
-            .distance(from: CLLocation(latitude: lat2, longitude: lon2))
+    // MARK: - Hairpin detection
+
+    private func detectHairpins(in points: [RoutePoint]) -> [Int] {
+        guard points.count >= 7 else { return [] }
+
+        let step = max(0.5, medianSpacing(points))
+        let window = max(1, Int((hairpinHeadingWindowM / step).rounded()))
+        guard points.count > window * 2 + 1 else { return [] }
+
+        struct Candidate {
+            let index: Int
+            let angleDeg: Double
+        }
+
+        var candidates: [Candidate] = []
+
+        for i in window..<(points.count - window) {
+            let before = points[i - window]
+            let center = points[i]
+            let after = points[i + window]
+
+            let h1 = heading(from: before, to: center)
+            let h2 = heading(from: center, to: after)
+            let turn = abs(normalizedAngle(h2 - h1)) * 180.0 / .pi
+
+            if turn >= hairpinMinimumTurnDeg {
+                candidates.append(Candidate(index: i, angleDeg: turn))
+            }
+        }
+
+        guard !candidates.isEmpty else { return [] }
+
+        var result: [Int] = []
+        var cluster: [Candidate] = []
+
+        func flushCluster() {
+            guard !cluster.isEmpty else { return }
+            if let best = cluster.max(by: { $0.angleDeg < $1.angleDeg }) {
+                result.append(best.index)
+            }
+            cluster.removeAll(keepingCapacity: true)
+        }
+
+        for candidate in candidates {
+            if let last = cluster.last {
+                let gap = points[candidate.index].distanceM - points[last.index].distanceM
+                if gap > hairpinClusterM {
+                    flushCluster()
+                }
+            }
+            cluster.append(candidate)
+        }
+        flushCluster()
+
+        return result
+    }
+
+    private func normalizedAnchors(_ hairpins: [Int], pointCount: Int) -> [Int] {
+        guard pointCount >= 2 else { return [0] }
+        var anchors = [0]
+        anchors.append(contentsOf: hairpins.filter { $0 > 0 && $0 < pointCount - 1 })
+        anchors.append(pointCount - 1)
+        return Array(Set(anchors)).sorted()
+    }
+
+    private func medianSpacing(_ points: [RoutePoint]) -> Double {
+        guard points.count >= 2 else { return resampleStepM }
+        let deltas = zip(points.dropFirst(), points).map { max(0, $0.distanceM - $1.distanceM) }
+        let sorted = deltas.sorted()
+        return sorted[sorted.count / 2]
+    }
+
+    private func heading(from a: RoutePoint, to b: RoutePoint) -> Double {
+        let meanLat = (a.latitude + b.latitude) * 0.5 * .pi / 180.0
+        let x = (b.longitude - a.longitude) * cos(meanLat)
+        let y = b.latitude - a.latitude
+        return atan2(y, x)
+    }
+
+    private func normalizedAngle(_ angle: Double) -> Double {
+        var a = angle
+        while a > .pi { a -= 2 * .pi }
+        while a < -.pi { a += 2 * .pi }
+        return a
+    }
+
+    // MARK: - Elevation reconstruction
+
+    private func rebuildElevationBySegments(_ source: [RoutePoint], anchors: [Int]) -> [RoutePoint] {
+        guard source.count >= 2, anchors.count >= 2 else { return source }
+
+        var elevations = source.map(\.elevationM)
+
+        for segment in 0..<(anchors.count - 1) {
+            let i0 = anchors[segment]
+            let i1 = anchors[segment + 1]
+            guard i1 > i0 else { continue }
+
+            let d0 = source[i0].distanceM
+            let d1 = source[i1].distanceM
+            let e0 = source[i0].elevationM
+            let e1 = source[i1].elevationM
+            let length = max(0.001, d1 - d0)
+
+            for i in i0...i1 {
+                let t = min(1, max(0, (source[i].distanceM - d0) / length))
+                elevations[i] = e0 + (e1 - e0) * t
+            }
+        }
+
+        return source.indices.map { i in
+            RoutePoint(
+                distanceM: source[i].distanceM,
+                elevationM: elevations[i],
+                latitude: source[i].latitude,
+                longitude: source[i].longitude
+            )
+        }
+    }
+
+    private func elevation(in source: [RoutePoint], at distanceM: Double) -> Double {
+        interpolatedPoint(in: source, at: distanceM).elevationM
+    }
+
+    private func forwardGrade(in source: [RoutePoint], at distanceM: Double, lookAheadM: Double) -> Double {
+        guard let total = source.last?.distanceM else { return 0 }
+        let a = min(max(0, distanceM), total)
+        let b = min(total, a + max(0, lookAheadM))
+        guard b - a >= 2 else { return 0 }
+        return 100.0 * (elevation(in: source, at: b) - elevation(in: source, at: a)) / (b - a)
     }
 
     // MARK: - XML
@@ -403,7 +478,6 @@ final class GPXParser: NSObject, XMLParserDelegate {
         qualifiedName qName: String?,
         attributes attributeDict: [String: String] = [:]
     ) {
-        currentElement = elementName
         textBuffer = ""
 
         if elementName == "trkpt" || elementName == "rtept" {
@@ -429,14 +503,13 @@ final class GPXParser: NSObject, XMLParserDelegate {
             if let lat = currentLat,
                let lon = currentLon,
                let ele = currentEle {
-                points.append((lat: lat, lon: lon, ele: ele))
+                rawPoints.append(RawPoint(lat: lat, lon: lon, ele: ele))
             }
             currentLat = nil
             currentLon = nil
             currentEle = nil
         }
 
-        currentElement = ""
         textBuffer = ""
     }
 }
