@@ -128,7 +128,149 @@ final class GPXParser: NSObject, XMLParserDelegate {
             )
         }
 
-        return GPXRoute(points: routePoints)
+        return GPXRoute(points: preprocess(routePoints))
+    }
+
+    // MARK: - GPX preprocessing
+
+    /// Normalizes imported GPX tracks before they are used by both RideModel and 3D.
+    ///
+    /// Rules:
+    /// - resample along the original polyline every 5 m;
+    /// - never smooth latitude/longitude, so hairpins are not cut;
+    /// - smooth elevation only, using a centered 25 m window;
+    /// - preserve the exact first/last elevations and route endpoints.
+    private func preprocess(_ source: [RoutePoint]) -> [RoutePoint] {
+        let cleaned = removeNearDuplicates(source, minimumSpacingM: 0.5)
+        guard cleaned.count >= 2 else { return cleaned }
+
+        let resampled = resample(cleaned, stepM: 5.0)
+        return smoothElevation(resampled, radiusM: 25.0)
+    }
+
+    private func removeNearDuplicates(
+        _ source: [RoutePoint],
+        minimumSpacingM: Double
+    ) -> [RoutePoint] {
+        guard let first = source.first else { return [] }
+
+        var result: [RoutePoint] = [first]
+        result.reserveCapacity(source.count)
+
+        for point in source.dropFirst() {
+            guard let last = result.last else { continue }
+            if point.distanceM - last.distanceM >= minimumSpacingM {
+                result.append(point)
+            }
+        }
+
+        if let sourceLast = source.last,
+           let resultLast = result.last,
+           sourceLast.distanceM > resultLast.distanceM {
+            result.append(sourceLast)
+        }
+
+        return result
+    }
+
+    private func resample(_ source: [RoutePoint], stepM: Double) -> [RoutePoint] {
+        guard source.count >= 2,
+              let last = source.last,
+              last.distanceM > 0,
+              stepM > 0 else {
+            return source
+        }
+
+        let total = last.distanceM
+        var result: [RoutePoint] = []
+        result.reserveCapacity(Int(total / stepM) + 2)
+
+        var target = 0.0
+        var segmentIndex = 0
+
+        while target <= total {
+            while segmentIndex + 1 < source.count &&
+                    source[segmentIndex + 1].distanceM < target {
+                segmentIndex += 1
+            }
+
+            let nextIndex = min(source.count - 1, segmentIndex + 1)
+            let a = source[segmentIndex]
+            let b = source[nextIndex]
+            let span = max(0.001, b.distanceM - a.distanceM)
+            let t = min(1.0, max(0.0, (target - a.distanceM) / span))
+
+            result.append(
+                RoutePoint(
+                    distanceM: target,
+                    elevationM: a.elevationM + (b.elevationM - a.elevationM) * t,
+                    latitude: a.latitude + (b.latitude - a.latitude) * t,
+                    longitude: a.longitude + (b.longitude - a.longitude) * t
+                )
+            )
+
+            target += stepM
+        }
+
+        if let resultLast = result.last, total - resultLast.distanceM > 0.1 {
+            result.append(
+                RoutePoint(
+                    distanceM: total,
+                    elevationM: last.elevationM,
+                    latitude: last.latitude,
+                    longitude: last.longitude
+                )
+            )
+        }
+
+        return result
+    }
+
+    private func smoothElevation(_ source: [RoutePoint], radiusM: Double) -> [RoutePoint] {
+        guard source.count >= 3, radiusM > 0 else { return source }
+
+        var result: [RoutePoint] = []
+        result.reserveCapacity(source.count)
+
+        var left = 0
+        var right = 0
+        var elevationSum = 0.0
+
+        for index in source.indices {
+            let centerDistance = source[index].distanceM
+            let minDistance = centerDistance - radiusM
+            let maxDistance = centerDistance + radiusM
+
+            while right < source.count && source[right].distanceM <= maxDistance {
+                elevationSum += source[right].elevationM
+                right += 1
+            }
+
+            while left < right && source[left].distanceM < minDistance {
+                elevationSum -= source[left].elevationM
+                left += 1
+            }
+
+            let count = max(1, right - left)
+            let smoothedElevation: Double
+
+            if index == source.startIndex || index == source.index(before: source.endIndex) {
+                smoothedElevation = source[index].elevationM
+            } else {
+                smoothedElevation = elevationSum / Double(count)
+            }
+
+            result.append(
+                RoutePoint(
+                    distanceM: source[index].distanceM,
+                    elevationM: smoothedElevation,
+                    latitude: source[index].latitude,
+                    longitude: source[index].longitude
+                )
+            )
+        }
+
+        return result
     }
 
     func parser(
