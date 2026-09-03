@@ -79,7 +79,7 @@ enum GPXParserError: Error {
 /// point-for-point. The output preserves the real climb structure:
 /// - primary climb length
 /// - number/order/location of major hairpins
-/// - elevation change of every inter-hairpin section
+/// - local elevation/grade profile
 /// - total start/end elevation difference
 ///
 /// It removes the two things that make dirty GPX files look bad in 3D:
@@ -87,8 +87,8 @@ enum GPXParserError: Error {
 /// - noisy elevation inside each road section
 ///
 /// Plan-view geometry is kept on the original GPX polyline and resampled at 5 m.
-/// Elevation is rebuilt piecewise-linearly between detected hairpins, exactly as in
-/// the successful manually regularized Alpe d'Huez test.
+/// Elevation is spatially denoised with local-linear regression so real grade
+/// changes remain present on climbs with or without hairpins.
 final class GPXParser: NSObject, XMLParserDelegate {
     private struct RawPoint {
         let lat: Double
@@ -137,14 +137,12 @@ final class GPXParser: NSObject, XMLParserDelegate {
         let resampled = resample(source, every: resampleStepM)
         guard resampled.count >= 2 else { throw GPXParserError.noTrackPoints }
 
-        // Detect the major switchbacks and use them as hard elevation anchors.
-        let hairpins = detectHairpins(in: resampled)
-        let anchors = normalizedAnchors(hairpins, pointCount: resampled.count)
-
-        // Elevation: rebuild every inter-hairpin road section as one clean ramp,
-        // retaining that section's original endpoint elevations. This preserves
-        // average grade per section and removes vertical GPS noise/spikes.
-        let regularized = rebuildElevationBySegments(resampled, anchors: anchors)
+        // Elevation must retain the REAL local profile. Hairpins are geometric
+        // landmarks only; they must never be used as elevation anchors because
+        // routes with few/no hairpins would collapse to one constant grade.
+        // Use a spatial local-linear smoother instead: it removes GPS altitude
+        // noise while preserving ramps and genuine grade changes.
+        let regularized = regularizeElevationWithTrend(resampled)
 
         return GPXRoute(points: regularized)
     }
@@ -423,38 +421,209 @@ final class GPXParser: NSObject, XMLParserDelegate {
         return a
     }
 
-    // MARK: - Elevation reconstruction
+    // MARK: - Elevation regularization with broad-trend consistency
 
-    private func rebuildElevationBySegments(_ source: [RoutePoint], anchors: [Int]) -> [RoutePoint] {
-        guard source.count >= 2, anchors.count >= 2 else { return source }
+    /// B39: preserve real ramps but reject short, implausible sign reversals.
+    ///
+    /// Example: if the broad 200-300 m terrain trend is uphill, a very short
+    /// -6% dip embedded between positive grades is treated as altitude noise
+    /// unless it persists long enough to be a credible road feature.
+    ///
+    /// Pipeline:
+    /// 1. light local-linear smoothing removes point-to-point altitude jitter;
+    /// 2. a broad local-linear trend estimates the terrain direction;
+    /// 3. short local grade runs opposite to that trend are replaced by a
+    ///    straight elevation bridge between their boundaries;
+    /// 4. a final light pass removes joins introduced by the bridge.
+    ///
+    /// Geometry (lat/lon) is never changed here.
+    private func regularizeElevationWithTrend(_ source: [RoutePoint]) -> [RoutePoint] {
+        guard source.count >= 5, let last = source.last else { return source }
 
-        var elevations = source.map(\.elevationM)
+        let total = last.distanceM
 
-        for segment in 0..<(anchors.count - 1) {
-            let i0 = anchors[segment]
-            let i1 = anchors[segment + 1]
-            guard i1 > i0 else { continue }
+        // Small-window denoising. This keeps genuine ramps while removing
+        // sample-scale altitude noise.
+        let localRadiusM: Double
+        if total < 2_000 {
+            localRadiusM = 15.0
+        } else if total < 6_000 {
+            localRadiusM = 20.0
+        } else {
+            localRadiusM = 25.0
+        }
 
-            let d0 = source[i0].distanceM
-            let d1 = source[i1].distanceM
-            let e0 = source[i0].elevationM
-            let e1 = source[i1].elevationM
-            let length = max(0.001, d1 - d0)
+        var cleaned = localLinearElevationSmooth(source, radiusM: localRadiusM)
 
-            for i in i0...i1 {
-                let t = min(1, max(0, (source[i].distanceM - d0) / length))
-                elevations[i] = e0 + (e1 - e0) * t
+        // Broad terrain context. For short climbs do not let the context window
+        // consume the whole route; for long climbs cap it at ~300 m.
+        let broadWindowM = min(300.0, max(120.0, total * 0.25))
+        let broadRadiusM = broadWindowM * 0.5
+        let trend = localLinearElevationSmooth(cleaned, radiusM: broadRadiusM)
+
+        // Local grade is intentionally evaluated over a distance longer than
+        // one 5 m sample, otherwise normal GPS altitude quantisation can flip
+        // the sign from sample to sample.
+        let localGradeWindowM: Double = total < 2_000 ? 30.0 : 40.0
+        let minimumTrendGradePercent = 1.0
+        let minimumOppositeDifferencePercent = 2.0
+        let maximumNoiseRunM: Double = total < 2_000 ? 65.0 : 80.0
+
+        var suspicious = Array(repeating: false, count: cleaned.count)
+
+        for i in cleaned.indices {
+            let d = cleaned[i].distanceM
+            let localGrade = centeredGrade(in: cleaned, at: d, windowM: localGradeWindowM)
+            let trendGrade = centeredGrade(in: trend, at: d, windowM: broadWindowM)
+
+            // Only reject a reversal if the broad trend itself is clear.
+            // A flat/rolling road is allowed to change sign naturally.
+            if abs(trendGrade) >= minimumTrendGradePercent,
+               localGrade * trendGrade < 0,
+               abs(localGrade - trendGrade) >= minimumOppositeDifferencePercent {
+                suspicious[i] = true
             }
         }
 
-        return source.indices.map { i in
-            RoutePoint(
-                distanceM: source[i].distanceM,
-                elevationM: elevations[i],
-                latitude: source[i].latitude,
-                longitude: source[i].longitude
+        // Group contiguous suspicious points. A short opposite-sign run is
+        // probably a false dip/bump; a long run is preserved as a real feature.
+        var i = 0
+        while i < suspicious.count {
+            guard suspicious[i] else {
+                i += 1
+                continue
+            }
+
+            let runStart = i
+            var runEnd = i
+            while runEnd + 1 < suspicious.count, suspicious[runEnd + 1] {
+                runEnd += 1
+            }
+
+            let runLengthM = cleaned[runEnd].distanceM - cleaned[runStart].distanceM
+
+            if runLengthM <= maximumNoiseRunM {
+                let leftIndex = max(0, runStart - 1)
+                let rightIndex = min(cleaned.count - 1, runEnd + 1)
+
+                if rightIndex > leftIndex {
+                    let left = cleaned[leftIndex]
+                    let right = cleaned[rightIndex]
+                    let span = max(0.001, right.distanceM - left.distanceM)
+
+                    if rightIndex - leftIndex >= 2 {
+                        for j in (leftIndex + 1)..<rightIndex {
+                            let t = (cleaned[j].distanceM - left.distanceM) / span
+                            cleaned[j] = RoutePoint(
+                                distanceM: cleaned[j].distanceM,
+                                elevationM: left.elevationM + (right.elevationM - left.elevationM) * t,
+                                latitude: cleaned[j].latitude,
+                                longitude: cleaned[j].longitude
+                            )
+                        }
+                    }
+                }
+            }
+
+            i = runEnd + 1
+        }
+
+        // Very light final pass to avoid a visible kink at repaired boundaries.
+        var out = localLinearElevationSmooth(cleaned, radiusM: 10.0)
+
+        // Preserve exact route endpoints and therefore exact net elevation change.
+        if !out.isEmpty {
+            out[0] = RoutePoint(
+                distanceM: out[0].distanceM,
+                elevationM: source[0].elevationM,
+                latitude: out[0].latitude,
+                longitude: out[0].longitude
+            )
+            let k = out.count - 1
+            out[k] = RoutePoint(
+                distanceM: out[k].distanceM,
+                elevationM: source[k].elevationM,
+                latitude: out[k].latitude,
+                longitude: out[k].longitude
             )
         }
+
+        return out
+    }
+
+    /// Weighted local-linear regression of elevation against route distance.
+    /// Linear ramps are preserved exactly; only local altitude noise is reduced.
+    private func localLinearElevationSmooth(_ source: [RoutePoint], radiusM: Double) -> [RoutePoint] {
+        guard source.count >= 3, radiusM > 0 else { return source }
+
+        var out: [RoutePoint] = []
+        out.reserveCapacity(source.count)
+
+        var left = 0
+        var right = 0
+
+        for i in source.indices {
+            let x0 = source[i].distanceM
+
+            while left < i && x0 - source[left].distanceM > radiusM {
+                left += 1
+            }
+            if right < i { right = i }
+            while right + 1 < source.count && source[right + 1].distanceM - x0 <= radiusM {
+                right += 1
+            }
+
+            var sw = 0.0
+            var swx = 0.0
+            var swy = 0.0
+            var swxx = 0.0
+            var swxy = 0.0
+
+            if left <= right {
+                for j in left...right {
+                    let x = source[j].distanceM - x0
+                    let distance = abs(x)
+                    let w = max(0.05, 1.0 - distance / max(0.001, radiusM))
+                    let y = source[j].elevationM
+
+                    sw += w
+                    swx += w * x
+                    swy += w * y
+                    swxx += w * x * x
+                    swxy += w * x * y
+                }
+            }
+
+            let denominator = sw * swxx - swx * swx
+            let fittedElevation: Double
+            if sw > 0, abs(denominator) > 1e-9 {
+                fittedElevation = (swy * swxx - swx * swxy) / denominator
+            } else if sw > 0 {
+                fittedElevation = swy / sw
+            } else {
+                fittedElevation = source[i].elevationM
+            }
+
+            out.append(
+                RoutePoint(
+                    distanceM: source[i].distanceM,
+                    elevationM: fittedElevation,
+                    latitude: source[i].latitude,
+                    longitude: source[i].longitude
+                )
+            )
+        }
+
+        return out
+    }
+
+    private func centeredGrade(in source: [RoutePoint], at distanceM: Double, windowM: Double) -> Double {
+        guard let total = source.last?.distanceM else { return 0 }
+        let half = max(5.0, windowM * 0.5)
+        let a = max(0.0, distanceM - half)
+        let b = min(total, distanceM + half)
+        guard b - a >= 2.0 else { return 0 }
+        return 100.0 * (elevation(in: source, at: b) - elevation(in: source, at: a)) / (b - a)
     }
 
     private func elevation(in source: [RoutePoint], at distanceM: Double) -> Double {
@@ -513,3 +682,4 @@ final class GPXParser: NSObject, XMLParserDelegate {
         textBuffer = ""
     }
 }
+
