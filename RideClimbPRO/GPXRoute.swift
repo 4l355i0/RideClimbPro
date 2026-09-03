@@ -73,7 +73,7 @@ enum GPXParserError: Error {
     case noTrackPoints
 }
 
-/// Build 42 GPX preprocessing — DEM-backed elevation
+/// Build 43 GPX preprocessing — DEM diagnostic elevation
 ///
 /// The imported GPX is treated as a GUIDE, not as geometry that must be reproduced
 /// point-for-point. The output preserves the real climb structure:
@@ -138,7 +138,7 @@ final class GPXParser: NSObject, XMLParserDelegate {
         let resampled = resample(source, every: resampleStepM)
         guard resampled.count >= 2 else { throw GPXParserError.noTrackPoints }
 
-        // B42: do not infer the road profile from dirty GPX altitude samples.
+        // B43 diagnostic: reconstruct the local elevation profile from DEM only.
         // Reconstruct elevation from a DEM using the cleaned lat/lon geometry.
         // For this test build we use OpenTopoData EU-DEM 25 m (Europe).
         // DEM samples are requested every 10 m, interpolated back onto the 5 m
@@ -437,16 +437,21 @@ final class GPXParser: NSObject, XMLParserDelegate {
     }
 
 
-    // MARK: - B42 DEM-backed elevation
+    // MARK: - B43 DEM diagnostic elevation
 
-    /// Test implementation using OpenTopoData's public EU-DEM 25 m dataset.
-    /// The public endpoint is suitable for testing and has rate limits; a
-    /// production build should use a dedicated/paid endpoint or self-hosted DEM.
+    /// Diagnostic implementation using OpenTopoData EU-DEM 25 m.
+    ///
+    /// Deliberately avoids two operations that contaminated the previous test:
+    /// - no cubic interpolation at the DEM service;
+    /// - no linear forcing to the GPX start/end elevations.
+    ///
+    /// DEM is sampled every 10 m along the cleaned road geometry, bilinearly
+    /// interpolated by the service, then smoothed over ~60 m before being mapped
+    /// back onto the internal 5 m route. This lets us inspect the DEM profile
+    /// itself without mixing it with the original GPX altitude profile.
     private func reconstructElevationFromDEM(_ source: [RoutePoint]) throws -> [RoutePoint] {
         guard source.count >= 2, let last = source.last, last.distanceM > 0 else { return source }
 
-        // Query at the native DEM scale. Asking for 5 m points from a 25 m DEM
-        // adds no information and only consumes API quota.
         let demStepM = 10.0
         var samplePoints: [RoutePoint] = []
         var d = 0.0
@@ -464,7 +469,7 @@ final class GPXParser: NSObject, XMLParserDelegate {
         while start < samplePoints.count {
             let end = min(start + batchSize, samplePoints.count)
             let batch = Array(samplePoints[start..<end])
-            if start > 0 { Thread.sleep(forTimeInterval: 1.05) } // public API: max 1 request/s
+            if start > 0 { Thread.sleep(forTimeInterval: 1.05) }
             let values = try fetchEUDEMElevations(batch)
             guard values.count == batch.count else {
                 throw NSError(
@@ -485,14 +490,20 @@ final class GPXParser: NSObject, XMLParserDelegate {
             )
         }
 
-        // A tiny 3-sample median suppresses isolated raster/cell artefacts without
-        // flattening sustained changes of slope. At 10 m spacing it sees ~30 m.
-        let cleanDEM = median3(demElevations)
+        // Smooth the DEM in distance, not by raw array index semantics.
+        // 30 m radius = ~60 m full window. Triangular weights avoid hard edges.
+        let cleanDEM = smoothDEMElevations(
+            distances: samplePoints.map(\.distanceM),
+            elevations: demElevations,
+            radiusM: 30.0
+        )
 
-        // Interpolate DEM elevations onto every 5 m route point.
+        // Interpolate the cleaned 10 m DEM profile onto the app's internal 5 m path.
+        // IMPORTANT: no endpoint correction against GPX elevations in this build.
         var out: [RoutePoint] = []
         out.reserveCapacity(source.count)
         var j = 0
+
         for p in source {
             while j + 1 < samplePoints.count && samplePoints[j + 1].distanceM < p.distanceM {
                 j += 1
@@ -517,25 +528,6 @@ final class GPXParser: NSObject, XMLParserDelegate {
             ))
         }
 
-        // DEM absolute datum/road-vs-terrain offsets can differ by several metres.
-        // Preserve the GPX's trusted boundary conditions and net elevation change
-        // without reintroducing any of its local noisy altitude samples.
-        guard let outLast = out.last else { return source }
-        let startError = source[0].elevationM - out[0].elevationM
-        let endError = source[source.count - 1].elevationM - outLast.elevationM
-        let span = max(1.0, last.distanceM)
-
-        for i in out.indices {
-            let t = out[i].distanceM / span
-            let correction = startError + (endError - startError) * t
-            out[i] = RoutePoint(
-                distanceM: out[i].distanceM,
-                elevationM: out[i].elevationM + correction,
-                latitude: out[i].latitude,
-                longitude: out[i].longitude
-            )
-        }
-
         return out
     }
 
@@ -549,7 +541,7 @@ final class GPXParser: NSObject, XMLParserDelegate {
         var components = URLComponents(string: "https://api.opentopodata.org/v1/eudem25m")!
         components.queryItems = [
             URLQueryItem(name: "locations", value: locations),
-            URLQueryItem(name: "interpolation", value: "cubic")
+            URLQueryItem(name: "interpolation", value: "bilinear")
         ]
 
         guard let url = components.url else {
@@ -602,13 +594,34 @@ final class GPXParser: NSObject, XMLParserDelegate {
         return values
     }
 
-    private func median3(_ values: [Double]) -> [Double] {
-        guard values.count >= 3 else { return values }
-        var out = values
-        for i in 1..<(values.count - 1) {
-            let trio = [values[i - 1], values[i], values[i + 1]].sorted()
-            out[i] = trio[1]
+    private func smoothDEMElevations(distances: [Double], elevations: [Double], radiusM: Double) -> [Double] {
+        guard elevations.count == distances.count, elevations.count >= 3, radiusM > 0 else {
+            return elevations
         }
+
+        var out = Array(repeating: 0.0, count: elevations.count)
+        var left = 0
+        var right = 0
+
+        for i in elevations.indices {
+            let x0 = distances[i]
+            while left < i && x0 - distances[left] > radiusM { left += 1 }
+            if right < i { right = i }
+            while right + 1 < elevations.count && distances[right + 1] - x0 <= radiusM { right += 1 }
+
+            var weighted = 0.0
+            var weights = 0.0
+            if left <= right {
+                for j in left...right {
+                    let dx = abs(distances[j] - x0)
+                    let w = max(0.0, 1.0 - dx / radiusM)
+                    weighted += elevations[j] * w
+                    weights += w
+                }
+            }
+            out[i] = weights > 0 ? weighted / weights : elevations[i]
+        }
+
         return out
     }
 
