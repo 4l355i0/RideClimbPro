@@ -14,7 +14,7 @@ struct GPXRoute {
     var totalDistanceM: Double {
         points.last?.distanceM ?? 0
     }
- 
+
     /// The same forward terrain horizon used by RideModel.
     func terrainLookAheadM(maximum: Double = 150.0) -> Double {
         min(maximum, totalDistanceM / 20.0)
@@ -80,118 +80,96 @@ enum GPXParserError: Error {
     case noTrackPoints
 }
 
-final class GPXParser: NSObject, XMLParserDelegate {
-    private var points: [(lat: Double, lon: Double, ele: Double)] = []
-    private var currentLat: Double?
-    private var currentLon: Double?
-    private var currentEle: Double?
-    private var currentElement = ""
-    private var textBuffer = ""
+/// GPX normalization used by BOTH RideModel and Climb3D.
+///
+/// Important design rule:
+/// - no moving-average smoothing of latitude/longitude (that cuts hairpins);
+/// - remove only GPS-scale noise / tiny loops;
+/// - simplify with a small geometric tolerance;
+/// - resample at a fixed 5 m spacing;
+/// - smooth elevation only, in the distance domain.
+private enum GPXPreprocessor {
+    struct RawPoint {
+        let lat: Double
+        let lon: Double
+        let ele: Double
+    }
 
-    func parse(data: Data) throws -> GPXRoute {
-        points.removeAll()
+    private struct XYPoint {
+        let raw: RawPoint
+        let x: Double
+        let y: Double
+    }
 
-        let parser = XMLParser(data: data)
-        parser.delegate = self
+    static let resampleStepM = 5.0
+    static let duplicateThresholdM = 0.50
+    static let spikeLegLimitM = 12.0
+    static let spikeClosureLimitM = 3.0
+    static let simplifyToleranceM = 1.25
+    static let elevationSmoothRadiusM = 25.0
 
-        guard parser.parse(), points.count >= 2 else {
-            throw parser.parserError ?? GPXParserError.noTrackPoints
+    static func process(_ input: [RawPoint]) -> [RoutePoint] {
+        guard input.count >= 2 else { return [] }
+
+        // 1. Remove true / near duplicates.
+        let deduplicated = removeNearDuplicates(input)
+        guard deduplicated.count >= 2 else { return [] }
+
+        // 2. Remove tiny A-B-C GPS hooks only. A real hairpin has a much larger
+        //    separation between A and C, so it survives this test.
+        let despiked = removeMicroHooks(deduplicated)
+        guard despiked.count >= 2 else { return [] }
+
+        // 3. RDP removes sub-metre / metre-scale lateral GPS wobble without doing
+        //    an averaging pass across neighbouring road legs. Tight hairpins are
+        //    retained because the maximum allowed displacement is only 1.25 m.
+        let simplified = simplifyRDP(despiked, toleranceM: simplifyToleranceM)
+        guard simplified.count >= 2 else { return [] }
+
+        // 4. Build a clean cumulative distance on the cleaned polyline.
+        let cleanRoute = routePoints(from: simplified)
+        guard cleanRoute.count >= 2,
+              let last = cleanRoute.last,
+              last.distanceM > 0 else {
+            return cleanRoute
         }
 
-        var routePoints: [RoutePoint] = []
-        var cumulative = 0.0
+        // 5. Fixed spatial sampling. This is the route consumed by both the
+        //    physics and the 3D mesh, so distance mapping remains 1:1.
+        let resampled = resample(cleanRoute, stepM: resampleStepM)
 
-        routePoints.append(
-            RoutePoint(
-                distanceM: 0,
-                elevationM: points[0].ele,
-                latitude: points[0].lat,
-                longitude: points[0].lon
-            )
-        )
-
-        for index in 1..<points.count {
-            let previous = points[index - 1]
-            let current = points[index]
-
-            let a = CLLocation(latitude: previous.lat, longitude: previous.lon)
-            let b = CLLocation(latitude: current.lat, longitude: current.lon)
-
-            cumulative += a.distance(from: b)
-            routePoints.append(
-                RoutePoint(
-                    distanceM: cumulative,
-                    elevationM: current.ele,
-                    latitude: current.lat,
-                    longitude: current.lon
-                )
-            )
-        }
-
-        return GPXRoute(points: preprocess(routePoints))
+        // 6. Elevation only. No horizontal smoothing is performed here.
+        return smoothElevation(resampled, radiusM: elevationSmoothRadiusM)
     }
 
-    // MARK: - GPX preprocessing
-
-    /// Geometry-safe preprocessing used by both RideModel and Climb 3D.
-    ///
-    /// Important invariants:
-    /// - the route distance is always recalculated from the coordinates actually kept;
-    /// - latitude/longitude are never conventionally smoothed (hairpins are preserved);
-    /// - only true near-duplicates / tiny out-and-back GPS spikes are removed;
-    /// - the cleaned polyline is resampled at ~5 m;
-    /// - elevation only is smoothed over +/-25 m.
-    private func preprocess(_ source: [RoutePoint]) -> [RoutePoint] {
-        guard source.count >= 2 else { return source }
-
-        let deduplicated = removeNearDuplicateCoordinates(source, minimumSpacingM: 0.75)
-        let despiked = removeTinyOutAndBackSpikes(deduplicated)
-        let geometryAligned = recalculateDistances(despiked)
-        let resampled = resample(geometryAligned, stepM: 5.0)
-        let distanceAligned = recalculateDistances(resampled)
-        return smoothElevation(distanceAligned, radiusM: 25.0)
-    }
-
-    private func horizontalDistanceM(_ a: RoutePoint, _ b: RoutePoint) -> Double {
-        CLLocation(latitude: a.latitude, longitude: a.longitude)
-            .distance(from: CLLocation(latitude: b.latitude, longitude: b.longitude))
-    }
-
-    private func removeNearDuplicateCoordinates(
-        _ source: [RoutePoint],
-        minimumSpacingM: Double
-    ) -> [RoutePoint] {
+    private static func removeNearDuplicates(_ source: [RawPoint]) -> [RawPoint] {
         guard let first = source.first else { return [] }
-
-        var result: [RoutePoint] = [first]
+        var result: [RawPoint] = [first]
         result.reserveCapacity(source.count)
 
         for point in source.dropFirst() {
-            guard let last = result.last else { continue }
-            if horizontalDistanceM(last, point) >= minimumSpacingM {
+            guard let last = result.last else {
+                result.append(point)
+                continue
+            }
+            if distanceM(last, point) >= duplicateThresholdM {
                 result.append(point)
             }
         }
 
-        // Preserve the true final coordinate even when very close to the
-        // preceding point.
-        if let sourceLast = source.last,
-           let resultLast = result.last,
-           (sourceLast.latitude != resultLast.latitude ||
-            sourceLast.longitude != resultLast.longitude) {
-            result.append(sourceLast)
+        if let originalLast = source.last,
+           let last = result.last,
+           distanceM(last, originalLast) > 0.05 {
+            result.append(originalLast)
         }
 
         return result
     }
 
-    /// Remove only very small GPS "hooks": A -> B -> C where B is only a
-    /// couple of metres away and C returns almost to A. A genuine hairpin is
-    /// much larger, so it is deliberately left untouched.
-    private func removeTinyOutAndBackSpikes(_ source: [RoutePoint]) -> [RoutePoint] {
+    private static func removeMicroHooks(_ source: [RawPoint]) -> [RawPoint] {
         guard source.count >= 3 else { return source }
 
-        var result: [RoutePoint] = []
+        var result: [RawPoint] = []
         result.reserveCapacity(source.count)
         result.append(source[0])
 
@@ -201,11 +179,15 @@ final class GPXParser: NSObject, XMLParserDelegate {
             let b = source[index]
             let c = source[index + 1]
 
-            let ab = horizontalDistanceM(a, b)
-            let bc = horizontalDistanceM(b, c)
-            let ac = horizontalDistanceM(a, c)
+            let ab = distanceM(a, b)
+            let bc = distanceM(b, c)
+            let ac = distanceM(a, c)
 
-            if ab <= 2.5 && bc <= 2.5 && ac <= 1.5 {
+            // A very short out-and-back GPS spike. This deliberately does NOT
+            // classify a normal U-turn / hairpin as noise.
+            if ab <= spikeLegLimitM,
+               bc <= spikeLegLimitM,
+               ac <= spikeClosureLimitM {
                 index += 1
                 continue
             }
@@ -214,42 +196,124 @@ final class GPXParser: NSObject, XMLParserDelegate {
             index += 1
         }
 
-        result.append(source[source.count - 1])
-        return result
-    }
-
-    private func recalculateDistances(_ source: [RoutePoint]) -> [RoutePoint] {
-        guard let first = source.first else { return [] }
-
-        var result: [RoutePoint] = []
-        result.reserveCapacity(source.count)
-        result.append(
-            RoutePoint(
-                distanceM: 0,
-                elevationM: first.elevationM,
-                latitude: first.latitude,
-                longitude: first.longitude
-            )
-        )
-
-        var cumulative = 0.0
-        for index in 1..<source.count {
-            cumulative += horizontalDistanceM(source[index - 1], source[index])
-            let p = source[index]
-            result.append(
-                RoutePoint(
-                    distanceM: cumulative,
-                    elevationM: p.elevationM,
-                    latitude: p.latitude,
-                    longitude: p.longitude
-                )
-            )
+        if let last = source.last {
+            result.append(last)
         }
 
         return result
     }
 
-    private func resample(_ source: [RoutePoint], stepM: Double) -> [RoutePoint] {
+    private static func simplifyRDP(_ source: [RawPoint], toleranceM: Double) -> [RawPoint] {
+        guard source.count > 2, toleranceM > 0 else { return source }
+
+        let lat0 = source[0].lat * .pi / 180.0
+        let latScale = 111_320.0
+        let lonScale = 111_320.0 * cos(lat0)
+        let lon0 = source[0].lon
+        let baseLat = source[0].lat
+
+        let xy: [XYPoint] = source.map { point in
+            XYPoint(
+                raw: point,
+                x: (point.lon - lon0) * lonScale,
+                y: (point.lat - baseLat) * latScale
+            )
+        }
+
+        var keep = Array(repeating: false, count: xy.count)
+        keep[0] = true
+        keep[xy.count - 1] = true
+
+        var stack: [(Int, Int)] = [(0, xy.count - 1)]
+
+        while let (start, end) = stack.popLast() {
+            guard end > start + 1 else { continue }
+
+            let a = xy[start]
+            let b = xy[end]
+            var maxDistance = -1.0
+            var maxIndex = -1
+
+            for i in (start + 1)..<end {
+                let d = pointToSegmentDistance(
+                    px: xy[i].x,
+                    py: xy[i].y,
+                    ax: a.x,
+                    ay: a.y,
+                    bx: b.x,
+                    by: b.y
+                )
+                if d > maxDistance {
+                    maxDistance = d
+                    maxIndex = i
+                }
+            }
+
+            if maxIndex >= 0, maxDistance > toleranceM {
+                keep[maxIndex] = true
+                stack.append((start, maxIndex))
+                stack.append((maxIndex, end))
+            }
+        }
+
+        return xy.indices.compactMap { keep[$0] ? xy[$0].raw : nil }
+    }
+
+    private static func pointToSegmentDistance(
+        px: Double,
+        py: Double,
+        ax: Double,
+        ay: Double,
+        bx: Double,
+        by: Double
+    ) -> Double {
+        let dx = bx - ax
+        let dy = by - ay
+        let length2 = dx * dx + dy * dy
+
+        if length2 <= 1e-12 {
+            return hypot(px - ax, py - ay)
+        }
+
+        let t = min(1.0, max(0.0, ((px - ax) * dx + (py - ay) * dy) / length2))
+        let qx = ax + t * dx
+        let qy = ay + t * dy
+        return hypot(px - qx, py - qy)
+    }
+
+    private static func routePoints(from source: [RawPoint]) -> [RoutePoint] {
+        guard let first = source.first else { return [] }
+
+        var result: [RoutePoint] = [
+            RoutePoint(
+                distanceM: 0,
+                elevationM: first.ele,
+                latitude: first.lat,
+                longitude: first.lon
+            )
+        ]
+        result.reserveCapacity(source.count)
+
+        var cumulative = 0.0
+        var previous = first
+
+        for point in source.dropFirst() {
+            cumulative += distanceM(previous, point)
+            result.append(
+                RoutePoint(
+                    distanceM: cumulative,
+                    elevationM: point.ele,
+                    latitude: point.lat,
+                    longitude: point.lon
+                )
+            )
+            previous = point
+        }
+
+        return result
+    }
+
+    private static func resample(_ source: [RoutePoint], stepM: Double) -> [RoutePoint] {
         guard source.count >= 2,
               let last = source.last,
               last.distanceM > 0,
@@ -265,8 +329,8 @@ final class GPXParser: NSObject, XMLParserDelegate {
         var segmentIndex = 0
 
         while target <= total {
-            while segmentIndex + 1 < source.count &&
-                    source[segmentIndex + 1].distanceM < target {
+            while segmentIndex + 1 < source.count,
+                  source[segmentIndex + 1].distanceM < target {
                 segmentIndex += 1
             }
 
@@ -288,25 +352,63 @@ final class GPXParser: NSObject, XMLParserDelegate {
             target += stepM
         }
 
-        // Always append the exact endpoint when the regular grid did not land
-        // on it.
-        if let resultLast = result.last, total - resultLast.distanceM > 0.1 {
-            result.append(
-                RoutePoint(
-                    distanceM: total,
-                    elevationM: last.elevationM,
-                    latitude: last.latitude,
-                    longitude: last.longitude
+        if let resultLast = result.last,
+           total - resultLast.distanceM > 0.05 {
+            result.append(last)
+        } else if let resultLast = result.last,
+                  abs(total - resultLast.distanceM) <= 0.05,
+                  resultLast.distanceM != total {
+            result[result.count - 1] = last
+        }
+
+        // The target distances above are intentionally the physical arc-length
+        // positions on the cleaned polyline. Recalculate once from final XY to
+        // eliminate any tiny lat/lon interpolation/projection discrepancy.
+        return recalculateDistances(result)
+    }
+
+    private static func recalculateDistances(_ source: [RoutePoint]) -> [RoutePoint] {
+        guard let first = source.first else { return [] }
+
+        var result: [RoutePoint] = [
+            RoutePoint(
+                distanceM: 0,
+                elevationM: first.elevationM,
+                latitude: first.latitude,
+                longitude: first.longitude
+            )
+        ]
+        result.reserveCapacity(source.count)
+
+        var cumulative = 0.0
+        var previous = first
+
+        for point in source.dropFirst() {
+            cumulative += CLLocation(
+                latitude: previous.latitude,
+                longitude: previous.longitude
+            ).distance(
+                from: CLLocation(
+                    latitude: point.latitude,
+                    longitude: point.longitude
                 )
             )
+
+            result.append(
+                RoutePoint(
+                    distanceM: cumulative,
+                    elevationM: point.elevationM,
+                    latitude: point.latitude,
+                    longitude: point.longitude
+                )
+            )
+            previous = point
         }
 
         return result
     }
 
-    /// Triangular, distance-domain elevation filter. The horizontal path and
-    /// route distances are not modified here.
-    private func smoothElevation(_ source: [RoutePoint], radiusM: Double) -> [RoutePoint] {
+    private static func smoothElevation(_ source: [RoutePoint], radiusM: Double) -> [RoutePoint] {
         guard source.count >= 3, radiusM > 0 else { return source }
 
         var result: [RoutePoint] = []
@@ -315,50 +417,82 @@ final class GPXParser: NSObject, XMLParserDelegate {
         var left = 0
         var right = 0
 
-        for index in source.indices {
-            let center = source[index].distanceM
+        for i in source.indices {
+            // Preserve the exact route endpoints.
+            if i == 0 || i == source.count - 1 {
+                result.append(source[i])
+                continue
+            }
 
-            while left < index && center - source[left].distanceM > radiusM {
+            let center = source[i].distanceM
+
+            while left < i && center - source[left].distanceM > radiusM {
                 left += 1
             }
-            if right < index { right = index }
-            while right + 1 < source.count &&
-                    source[right + 1].distanceM - center <= radiusM {
+
+            if right < i { right = i }
+            while right + 1 < source.count,
+                  source[right + 1].distanceM - center <= radiusM {
                 right += 1
             }
 
             var weightedElevation = 0.0
             var weightSum = 0.0
-            if left <= right {
-                for sampleIndex in left...right {
-                    let delta = abs(source[sampleIndex].distanceM - center)
-                    let weight = max(0.0, 1.0 - delta / radiusM)
-                    weightedElevation += source[sampleIndex].elevationM * weight
-                    weightSum += weight
-                }
+
+            for j in left...right {
+                let delta = abs(source[j].distanceM - center)
+                let weight = max(0.001, 1.0 - delta / radiusM)
+                weightedElevation += source[j].elevationM * weight
+                weightSum += weight
             }
 
-            let elevation: Double
-            if index == source.startIndex || index == source.index(before: source.endIndex) {
-                elevation = source[index].elevationM
-            } else if weightSum > 0 {
-                elevation = weightedElevation / weightSum
-            } else {
-                elevation = source[index].elevationM
-            }
+            let smoothed = weightSum > 0
+                ? weightedElevation / weightSum
+                : source[i].elevationM
 
-            let p = source[index]
             result.append(
                 RoutePoint(
-                    distanceM: p.distanceM,
-                    elevationM: elevation,
-                    latitude: p.latitude,
-                    longitude: p.longitude
+                    distanceM: source[i].distanceM,
+                    elevationM: smoothed,
+                    latitude: source[i].latitude,
+                    longitude: source[i].longitude
                 )
             )
         }
 
         return result
+    }
+
+    private static func distanceM(_ a: RawPoint, _ b: RawPoint) -> Double {
+        CLLocation(latitude: a.lat, longitude: a.lon)
+            .distance(from: CLLocation(latitude: b.lat, longitude: b.lon))
+    }
+}
+
+final class GPXParser: NSObject, XMLParserDelegate {
+    private var points: [GPXPreprocessor.RawPoint] = []
+    private var currentLat: Double?
+    private var currentLon: Double?
+    private var currentEle: Double?
+    private var currentElement = ""
+    private var textBuffer = ""
+
+    func parse(data: Data) throws -> GPXRoute {
+        points.removeAll()
+
+        let parser = XMLParser(data: data)
+        parser.delegate = self
+
+        guard parser.parse(), points.count >= 2 else {
+            throw parser.parserError ?? GPXParserError.noTrackPoints
+        }
+
+        let processed = GPXPreprocessor.process(points)
+        guard processed.count >= 2 else {
+            throw GPXParserError.noTrackPoints
+        }
+
+        return GPXRoute(points: processed)
     }
 
     func parser(
@@ -371,7 +505,7 @@ final class GPXParser: NSObject, XMLParserDelegate {
         currentElement = elementName
         textBuffer = ""
 
-        if elementName == "trkpt" {
+        if elementName == "trkpt" || elementName == "rtept" {
             currentLat = Double(attributeDict["lat"] ?? "")
             currentLon = Double(attributeDict["lon"] ?? "")
             currentEle = nil
@@ -390,11 +524,17 @@ final class GPXParser: NSObject, XMLParserDelegate {
     ) {
         if elementName == "ele" {
             currentEle = Double(textBuffer.trimmingCharacters(in: .whitespacesAndNewlines))
-        } else if elementName == "trkpt" {
+        } else if elementName == "trkpt" || elementName == "rtept" {
             if let lat = currentLat,
                let lon = currentLon,
                let ele = currentEle {
-                points.append((lat: lat, lon: lon, ele: ele))
+                points.append(
+                    GPXPreprocessor.RawPoint(
+                        lat: lat,
+                        lon: lon,
+                        ele: ele
+                    )
+                )
             }
             currentLat = nil
             currentLon = nil
