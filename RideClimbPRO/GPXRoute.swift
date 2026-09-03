@@ -133,22 +133,31 @@ final class GPXParser: NSObject, XMLParserDelegate {
 
     // MARK: - GPX preprocessing
 
-    /// Normalizes imported GPX tracks before they are used by both RideModel and 3D.
+    /// Geometry-safe preprocessing used by both RideModel and Climb 3D.
     ///
-    /// Rules:
-    /// - resample along the original polyline every 5 m;
-    /// - never smooth latitude/longitude, so hairpins are not cut;
-    /// - smooth elevation only, using a centered 25 m window;
-    /// - preserve the exact first/last elevations and route endpoints.
+    /// Important invariants:
+    /// - the route distance is always recalculated from the coordinates actually kept;
+    /// - latitude/longitude are never conventionally smoothed (hairpins are preserved);
+    /// - only true near-duplicates / tiny out-and-back GPS spikes are removed;
+    /// - the cleaned polyline is resampled at ~5 m;
+    /// - elevation only is smoothed over +/-25 m.
     private func preprocess(_ source: [RoutePoint]) -> [RoutePoint] {
-        let cleaned = removeNearDuplicates(source, minimumSpacingM: 0.5)
-        guard cleaned.count >= 2 else { return cleaned }
+        guard source.count >= 2 else { return source }
 
-        let resampled = resample(cleaned, stepM: 5.0)
-        return smoothElevation(resampled, radiusM: 25.0)
+        let deduplicated = removeNearDuplicateCoordinates(source, minimumSpacingM: 0.75)
+        let despiked = removeTinyOutAndBackSpikes(deduplicated)
+        let geometryAligned = recalculateDistances(despiked)
+        let resampled = resample(geometryAligned, stepM: 5.0)
+        let distanceAligned = recalculateDistances(resampled)
+        return smoothElevation(distanceAligned, radiusM: 25.0)
     }
 
-    private func removeNearDuplicates(
+    private func horizontalDistanceM(_ a: RoutePoint, _ b: RoutePoint) -> Double {
+        CLLocation(latitude: a.latitude, longitude: a.longitude)
+            .distance(from: CLLocation(latitude: b.latitude, longitude: b.longitude))
+    }
+
+    private func removeNearDuplicateCoordinates(
         _ source: [RoutePoint],
         minimumSpacingM: Double
     ) -> [RoutePoint] {
@@ -159,15 +168,82 @@ final class GPXParser: NSObject, XMLParserDelegate {
 
         for point in source.dropFirst() {
             guard let last = result.last else { continue }
-            if point.distanceM - last.distanceM >= minimumSpacingM {
+            if horizontalDistanceM(last, point) >= minimumSpacingM {
                 result.append(point)
             }
         }
 
+        // Preserve the true final coordinate even when very close to the
+        // preceding point.
         if let sourceLast = source.last,
            let resultLast = result.last,
-           sourceLast.distanceM > resultLast.distanceM {
+           (sourceLast.latitude != resultLast.latitude ||
+            sourceLast.longitude != resultLast.longitude) {
             result.append(sourceLast)
+        }
+
+        return result
+    }
+
+    /// Remove only very small GPS "hooks": A -> B -> C where B is only a
+    /// couple of metres away and C returns almost to A. A genuine hairpin is
+    /// much larger, so it is deliberately left untouched.
+    private func removeTinyOutAndBackSpikes(_ source: [RoutePoint]) -> [RoutePoint] {
+        guard source.count >= 3 else { return source }
+
+        var result: [RoutePoint] = []
+        result.reserveCapacity(source.count)
+        result.append(source[0])
+
+        var index = 1
+        while index < source.count - 1 {
+            let a = result.last ?? source[index - 1]
+            let b = source[index]
+            let c = source[index + 1]
+
+            let ab = horizontalDistanceM(a, b)
+            let bc = horizontalDistanceM(b, c)
+            let ac = horizontalDistanceM(a, c)
+
+            if ab <= 2.5 && bc <= 2.5 && ac <= 1.5 {
+                index += 1
+                continue
+            }
+
+            result.append(b)
+            index += 1
+        }
+
+        result.append(source[source.count - 1])
+        return result
+    }
+
+    private func recalculateDistances(_ source: [RoutePoint]) -> [RoutePoint] {
+        guard let first = source.first else { return [] }
+
+        var result: [RoutePoint] = []
+        result.reserveCapacity(source.count)
+        result.append(
+            RoutePoint(
+                distanceM: 0,
+                elevationM: first.elevationM,
+                latitude: first.latitude,
+                longitude: first.longitude
+            )
+        )
+
+        var cumulative = 0.0
+        for index in 1..<source.count {
+            cumulative += horizontalDistanceM(source[index - 1], source[index])
+            let p = source[index]
+            result.append(
+                RoutePoint(
+                    distanceM: cumulative,
+                    elevationM: p.elevationM,
+                    latitude: p.latitude,
+                    longitude: p.longitude
+                )
+            )
         }
 
         return result
@@ -212,6 +288,8 @@ final class GPXParser: NSObject, XMLParserDelegate {
             target += stepM
         }
 
+        // Always append the exact endpoint when the regular grid did not land
+        // on it.
         if let resultLast = result.last, total - resultLast.distanceM > 0.1 {
             result.append(
                 RoutePoint(
@@ -226,6 +304,8 @@ final class GPXParser: NSObject, XMLParserDelegate {
         return result
     }
 
+    /// Triangular, distance-domain elevation filter. The horizontal path and
+    /// route distances are not modified here.
     private func smoothElevation(_ source: [RoutePoint], radiusM: Double) -> [RoutePoint] {
         guard source.count >= 3, radiusM > 0 else { return source }
 
@@ -234,38 +314,46 @@ final class GPXParser: NSObject, XMLParserDelegate {
 
         var left = 0
         var right = 0
-        var elevationSum = 0.0
 
         for index in source.indices {
-            let centerDistance = source[index].distanceM
-            let minDistance = centerDistance - radiusM
-            let maxDistance = centerDistance + radiusM
+            let center = source[index].distanceM
 
-            while right < source.count && source[right].distanceM <= maxDistance {
-                elevationSum += source[right].elevationM
+            while left < index && center - source[left].distanceM > radiusM {
+                left += 1
+            }
+            if right < index { right = index }
+            while right + 1 < source.count &&
+                    source[right + 1].distanceM - center <= radiusM {
                 right += 1
             }
 
-            while left < right && source[left].distanceM < minDistance {
-                elevationSum -= source[left].elevationM
-                left += 1
+            var weightedElevation = 0.0
+            var weightSum = 0.0
+            if left <= right {
+                for sampleIndex in left...right {
+                    let delta = abs(source[sampleIndex].distanceM - center)
+                    let weight = max(0.0, 1.0 - delta / radiusM)
+                    weightedElevation += source[sampleIndex].elevationM * weight
+                    weightSum += weight
+                }
             }
 
-            let count = max(1, right - left)
-            let smoothedElevation: Double
-
+            let elevation: Double
             if index == source.startIndex || index == source.index(before: source.endIndex) {
-                smoothedElevation = source[index].elevationM
+                elevation = source[index].elevationM
+            } else if weightSum > 0 {
+                elevation = weightedElevation / weightSum
             } else {
-                smoothedElevation = elevationSum / Double(count)
+                elevation = source[index].elevationM
             }
 
+            let p = source[index]
             result.append(
                 RoutePoint(
-                    distanceM: source[index].distanceM,
-                    elevationM: smoothedElevation,
-                    latitude: source[index].latitude,
-                    longitude: source[index].longitude
+                    distanceM: p.distanceM,
+                    elevationM: elevation,
+                    latitude: p.latitude,
+                    longitude: p.longitude
                 )
             )
         }
