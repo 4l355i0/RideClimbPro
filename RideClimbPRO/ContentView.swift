@@ -13,6 +13,7 @@ struct ContentView: View {
     @State private var showShareSheet = false
     @State private var lastLogSampleAt: Date?
     @State private var showDiagnostics = false
+    @State private var previewDistanceM: Double = 0
 
     // Drivetrain draft: nothing changes until Apply drivetrain is pressed.
     @State private var draftChainringCount = 1
@@ -29,6 +30,8 @@ struct ContentView: View {
         TabView {
             ridePage
                 .tabItem { Label("Ride", systemImage: "bicycle") }
+            climb2DPage
+                .tabItem { Label("2D", systemImage: "chart.xyaxis.line") }
             climb3DPage
                 .tabItem { Label("3D", systemImage: "mountain.2.fill") }
             setupPage
@@ -48,6 +51,10 @@ struct ContentView: View {
                 trainerSpeedKPH: trainer.speedKPH,
                 now: now
             )
+
+            if ride.isRiding {
+                previewDistanceM = ride.distanceM
+            }
 
             let grade = ride.currentGradePercent
             if lastSentGrade == nil ||
@@ -102,6 +109,7 @@ struct ContentView: View {
                 do {
                     try ride.loadGPX(url: url)
                     try climb3D.load(route: ride.route)
+                    previewDistanceM = 0
                     lastSentGrade = nil
                 } catch {
                     ride.status = "GPX error: \(error.localizedDescription)"
@@ -397,13 +405,74 @@ struct ContentView: View {
     }
 
 
+    private var climb2DPage: some View {
+        NavigationStack {
+            Group {
+                if let route = ride.route {
+                    VStack(spacing: 12) {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(ride.routeName ?? "GPX")
+                                    .font(.headline)
+                                    .lineLimit(1)
+                                Text(String(format: "%.1f km • %d points", route.totalDistanceM / 1000, route.points.count))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            let warnings = route.suspiciousGradeSegments()
+                            if warnings.isEmpty {
+                                Label("GPX OK", systemImage: "checkmark.circle.fill")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.green)
+                            } else {
+                                Label("\(warnings.count) warning\(warnings.count == 1 ? "" : "s")", systemImage: "exclamationmark.triangle.fill")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.orange)
+                            }
+                        }
+
+                        RideClimbRoute2DView(
+                            route: route,
+                            distanceM: ride.isRiding ? ride.distanceM : previewDistanceM
+                        )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                        VStack(spacing: 5) {
+                            Slider(value: $previewDistanceM, in: 0...max(1, route.totalDistanceM))
+                                .disabled(ride.isRiding)
+                            HStack {
+                                Text(String(format: "%.1f km", (ride.isRiding ? ride.distanceM : previewDistanceM) / 1000))
+                                Spacer()
+                                Text(String(format: "%.1f%%", route.grade(at: ride.isRiding ? ride.distanceM : previewDistanceM)))
+                                Spacer()
+                                Text(String(format: "%.0f m", route.elevation(at: ride.isRiding ? ride.distanceM : previewDistanceM)))
+                            }
+                            .font(.caption.weight(.semibold))
+                            .monospacedDigit()
+                        }
+                    }
+                    .padding()
+                } else {
+                    ContentUnavailableView(
+                        "No 2D route",
+                        systemImage: "chart.xyaxis.line",
+                        description: Text("Import a planned GPX route from the Ride tab.")
+                    )
+                }
+            }
+            .navigationTitle("Climb 2D")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+    }
+
     private var climb3DPage: some View {
         NavigationStack {
             ZStack {
                 if climb3D.hasMesh, let route = ride.route {
                     RideClimbPRO3DView(
                         sceneController: climb3D.sceneController,
-                        distanceM: ride.distanceM
+                        distanceM: ride.isRiding ? ride.distanceM : previewDistanceM
                     )
                     .ignoresSafeArea(edges: .top)
 
@@ -418,7 +487,7 @@ struct ContentView: View {
                                     Text(
                                         String(
                                             format: "%.1f / %.1f km",
-                                            ride.distanceM / 1000,
+                                            (ride.isRiding ? ride.distanceM : previewDistanceM) / 1000,
                                             route.totalDistanceM / 1000
                                         )
                                     )
@@ -431,7 +500,7 @@ struct ContentView: View {
                                 Text(
                                     String(
                                         format: "%.1f%%",
-                                        ride.currentGradePercent
+                                        route.grade(at: ride.isRiding ? ride.distanceM : previewDistanceM)
                                     )
                                 )
                                 .font(.title2.bold())
@@ -475,11 +544,31 @@ struct ContentView: View {
 
                         Spacer()
 
+                        VStack(spacing: 4) {
+                            Slider(
+                                value: $previewDistanceM,
+                                in: 0...max(1, route.totalDistanceM)
+                            )
+                            .disabled(ride.isRiding)
+
+                            HStack {
+                                Text("Start")
+                                Spacer()
+                                Text(ride.isRiding ? "Live" : String(format: "%.1f km", previewDistanceM / 1000))
+                                    .monospacedDigit()
+                                Spacer()
+                                Text("Finish")
+                            }
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        }
+                        .padding(.horizontal)
+
                         HStack {
                             Text(
                                 String(
                                     format: "%.0f m",
-                                    ride.currentElevationM
+                                    route.elevation(at: ride.isRiding ? ride.distanceM : previewDistanceM)
                                 )
                             )
                             .monospacedDigit()
@@ -1517,6 +1606,94 @@ private struct RouteProfileView: View {
                     .secondary.opacity(0.06),
                     in: RoundedRectangle(cornerRadius: 10)
                 )
+            }
+        }
+    }
+}
+
+
+private struct RideClimbRoute2DView: View {
+    let route: GPXRoute
+    let distanceM: Double
+
+    @State private var zoom: CGFloat = 1
+    @State private var committedZoom: CGFloat = 1
+    @State private var offset: CGSize = .zero
+    @State private var committedOffset: CGSize = .zero
+
+    var body: some View {
+        GeometryReader { geo in
+            Canvas { context, size in
+                guard route.points.count >= 2 else { return }
+                let first = route.points[0]
+                let latScale = 111_320.0
+                let lonScale = 111_320.0 * cos(first.latitude * .pi / 180.0)
+                let xy = route.points.map { point in
+                    CGPoint(
+                        x: (point.longitude - first.longitude) * lonScale,
+                        y: -(point.latitude - first.latitude) * latScale
+                    )
+                }
+
+                let minX = xy.map(\.x).min() ?? 0
+                let maxX = xy.map(\.x).max() ?? 1
+                let minY = xy.map(\.y).min() ?? 0
+                let maxY = xy.map(\.y).max() ?? 1
+                let spanX = max(1, maxX - minX)
+                let spanY = max(1, maxY - minY)
+                let baseScale = min((size.width - 24) / spanX, (size.height - 24) / spanY)
+                let scale = baseScale * zoom
+
+                func screen(_ p: CGPoint) -> CGPoint {
+                    CGPoint(
+                        x: size.width / 2 + (p.x - (minX + maxX)/2) * scale + offset.width,
+                        y: size.height / 2 + (p.y - (minY + maxY)/2) * scale + offset.height
+                    )
+                }
+
+                var path = Path()
+                path.move(to: screen(xy[0]))
+                for p in xy.dropFirst() { path.addLine(to: screen(p)) }
+                context.stroke(path, with: .color(.primary), lineWidth: 3)
+
+                let clamped = min(max(distanceM, 0), route.totalDistanceM)
+                var idx = 1
+                while idx < route.points.count && route.points[idx].distanceM < clamped { idx += 1 }
+                idx = min(idx, route.points.count - 1)
+                let aIndex = max(0, idx - 1)
+                let a = route.points[aIndex]
+                let b = route.points[idx]
+                let f = b.distanceM > a.distanceM ? (clamped - a.distanceM) / (b.distanceM - a.distanceM) : 0
+                let markerMap = CGPoint(
+                    x: xy[aIndex].x + (xy[idx].x - xy[aIndex].x) * f,
+                    y: xy[aIndex].y + (xy[idx].y - xy[aIndex].y) * f
+                )
+                let marker = screen(markerMap)
+                let rect = CGRect(x: marker.x - 6, y: marker.y - 6, width: 12, height: 12)
+                context.fill(Path(ellipseIn: rect), with: .color(.red))
+            }
+            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
+            .gesture(
+                MagnificationGesture()
+                    .onChanged { value in zoom = min(8, max(0.7, committedZoom * value)) }
+                    .onEnded { _ in committedZoom = zoom }
+            )
+            .simultaneousGesture(
+                DragGesture()
+                    .onChanged { value in
+                        offset = CGSize(width: committedOffset.width + value.translation.width, height: committedOffset.height + value.translation.height)
+                    }
+                    .onEnded { _ in committedOffset = offset }
+            )
+            .overlay(alignment: .topTrailing) {
+                Button("Fit") {
+                    zoom = 1
+                    committedZoom = 1
+                    offset = .zero
+                    committedOffset = .zero
+                }
+                .buttonStyle(.bordered)
+                .padding(8)
             }
         }
     }
