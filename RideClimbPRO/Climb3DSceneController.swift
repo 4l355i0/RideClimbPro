@@ -37,11 +37,11 @@ final class Climb3DSceneController {
     private let maxFollowTargetLiftM: Float = 0.70
 
     init() {
-        let markerGeometry = SCNSphere(radius: 0.52)
+        let markerGeometry = SCNSphere(radius: 0.66)
         markerGeometry.segmentCount = 24
         markerGeometry.firstMaterial?.diffuse.contents = UIColor.systemRed
         markerGeometry.firstMaterial?.emission.contents =
-            UIColor.systemRed.withAlphaComponent(0.28)
+            UIColor.systemRed.withAlphaComponent(0.50)
         markerGeometry.firstMaterial?.lightingModel = .physicallyBased
 
         markerNode = SCNNode(geometry: markerGeometry)
@@ -202,7 +202,7 @@ final class Climb3DSceneController {
         let markerTarget =
             SCNVector3(
                 position.x,
-                position.y + 0.50,
+                position.y + 0.68,
                 position.z
             )
 
@@ -696,8 +696,8 @@ final class Climb3DSceneController {
             let b = points[i]
             routeNode.addChildNode(
                 lineNode(
-                    from: SCNVector3(a.x, a.y+0.08, a.z),
-                    to: SCNVector3(b.x, b.y+0.08, b.z)
+                    from: SCNVector3(a.x, a.y+0.14, a.z),
+                    to: SCNVector3(b.x, b.y+0.14, b.z)
                 )
             )
         }
@@ -709,12 +709,12 @@ final class Climb3DSceneController {
         let dz = b.z-a.z
         let length = sqrt(dx*dx + dy*dy + dz*dz)
 
-        let cylinder = SCNCylinder(radius: 0.075, height: CGFloat(length))
+        let cylinder = SCNCylinder(radius: 0.11, height: CGFloat(length))
         cylinder.radialSegmentCount = 5
         cylinder.firstMaterial?.diffuse.contents =
-            UIColor.white.withAlphaComponent(0.78)
+            UIColor.white.withAlphaComponent(0.96)
         cylinder.firstMaterial?.emission.contents =
-            UIColor.white.withAlphaComponent(0.08)
+            UIColor.white.withAlphaComponent(0.24)
 
         let node = SCNNode(geometry: cylinder)
         node.position =
