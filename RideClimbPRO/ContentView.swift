@@ -3,6 +3,7 @@ import UniformTypeIdentifiers
 import Foundation
 
 struct ContentView: View {
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @EnvironmentObject private var trainer: TrainerManager
     @EnvironmentObject private var ride: RideModel
     @StateObject private var climb3D = RideClimbPRO3DModel()
@@ -14,6 +15,10 @@ struct ContentView: View {
     @State private var lastLogSampleAt: Date?
     @State private var showDiagnostics = false
     @State private var previewDistanceM: Double = 0
+    @State private var powerHistory: [Double] = []
+    @State private var heartRateHistory: [Double] = []
+    @State private var cadenceHistory: [Double] = []
+    @State private var lastTelemetrySampleAt: Date?
 
     // Drivetrain draft: nothing changes until Apply drivetrain is pressed.
     @State private var draftChainringCount = 1
@@ -41,6 +46,7 @@ struct ContentView: View {
         }
         .onAppear { loadDrivetrainDraft() }
         .onReceive(timer) { now in
+            recordTelemetrySnapshot(now: now)
             guard trainer.controlReady else { return }
 
             // Preserve the validated cadence + virtual-gear ride engine while pedalling.
@@ -125,8 +131,9 @@ struct ContentView: View {
         NavigationStack {
             GeometryReader { geo in
                 let compact = geo.size.height < 700
+                let wide = geo.size.width >= 700
 
-                VStack(spacing: compact ? 7 : 9) {
+                VStack(spacing: compact ? 7 : (wide ? 14 : 9)) {
                     connectionStrip
 
                     // Primary ride telemetry: the three values the rider
@@ -136,7 +143,8 @@ struct ContentView: View {
                             "POWER",
                             "\(trainer.power3sW)",
                             "W",
-                            powerZoneColor
+                            powerZoneColor,
+                            powerHistory
                         )
 
                         telemetryHero(
@@ -145,17 +153,19 @@ struct ContentView: View {
                                 ? "\(trainer.heartRateBPM)"
                                 : "—",
                             trainer.heartRateBPM > 0 ? "bpm" : "",
-                            hrZoneColor
+                            hrZoneColor,
+                            heartRateHistory
                         )
 
                         telemetryHero(
                             "CADENCE",
                             String(format: "%.0f", trainer.cadenceRPM),
                             "rpm",
-                            .primary
+                            trainer.cadenceRPM > 0 ? .blue : .gray,
+                            cadenceHistory
                         )
                     }
-                    .frame(height: compact ? 104 : 118)
+                    .frame(height: compact ? 104 : (wide ? 158 : 118))
 
                     HStack(spacing: 7) {
                         dashMetric(
@@ -225,8 +235,8 @@ struct ContentView: View {
                     .padding(10)
                     .frame(
                         maxWidth: .infinity,
-                        minHeight: compact ? 250 : 290,
-                        maxHeight: compact ? 250 : 290
+                        minHeight: compact ? 250 : (wide ? 390 : 290),
+                        maxHeight: compact ? 250 : (wide ? 390 : 290)
                     )
                     .background(
                         .thinMaterial,
@@ -870,6 +880,26 @@ struct ContentView: View {
         }
     }
 
+    private func recordTelemetrySnapshot(now: Date) {
+        // 0.5 s samples, 120 points = rolling 60 s telemetry window.
+        if let lastTelemetrySampleAt,
+           now.timeIntervalSince(lastTelemetrySampleAt) < 0.5 {
+            return
+        }
+
+        lastTelemetrySampleAt = now
+        appendTelemetry(Double(trainer.power3sW), to: &powerHistory)
+        appendTelemetry(Double(trainer.heartRateBPM), to: &heartRateHistory)
+        appendTelemetry(trainer.cadenceRPM, to: &cadenceHistory)
+    }
+
+    private func appendTelemetry(_ value: Double, to history: inout [Double]) {
+        history.append(max(0, value))
+        if history.count > 120 {
+            history.removeFirst(history.count - 120)
+        }
+    }
+
     private var connectionStrip: some View {
         HStack(spacing: 8) {
             Circle()
@@ -1063,29 +1093,35 @@ struct ContentView: View {
         _ title: String,
         _ value: String,
         _ unit: String,
-        _ color: Color
+        _ color: Color,
+        _ history: [Double]
     ) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        let regular = horizontalSizeClass == .regular
+
+        return VStack(alignment: .leading, spacing: 3) {
             Text(title)
-                .font(.system(size: 9, weight: .bold))
+                .font(.system(size: regular ? 11 : 9, weight: .bold))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
 
-            Spacer(minLength: 0)
-
-            HStack(alignment: .firstTextBaseline, spacing: 2) {
+            HStack(alignment: .firstTextBaseline, spacing: 3) {
                 Text(value)
-                    .font(.system(size: 34, weight: .bold, design: .rounded))
+                    .font(.system(size: regular ? 44 : 34, weight: .bold, design: .rounded))
                     .minimumScaleFactor(0.48)
                     .lineLimit(1)
                 if !unit.isEmpty {
                     Text(unit)
-                        .font(.caption.bold())
+                        .font(regular ? .headline.bold() : .caption.bold())
                 }
             }
             .foregroundStyle(color)
+
+            TelemetrySparkline(values: history)
+                .stroke(color.opacity(history.count > 1 ? 0.9 : 0.28), style: StrokeStyle(lineWidth: regular ? 2.2 : 1.7, lineCap: .round, lineJoin: .round))
+                .frame(height: regular ? 38 : 25)
+                .accessibilityHidden(true)
         }
-        .padding(10)
+        .padding(regular ? 12 : 10)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .background(
             color.opacity(0.09),
@@ -1659,5 +1695,34 @@ private struct RideClimbRoute2DView: View {
                 .padding(8)
             }
         }
+    }
+}
+
+
+private struct TelemetrySparkline: Shape {
+    let values: [Double]
+
+    func path(in rect: CGRect) -> Path {
+        guard values.count > 1, rect.width > 0, rect.height > 0 else {
+            return Path()
+        }
+
+        let minValue = values.min() ?? 0
+        let maxValue = values.max() ?? 1
+        let range = max(maxValue - minValue, 1)
+        let dx = rect.width / CGFloat(values.count - 1)
+
+        var path = Path()
+        for (index, value) in values.enumerated() {
+            let x = CGFloat(index) * dx
+            let normalized = (value - minValue) / range
+            let y = rect.maxY - CGFloat(normalized) * rect.height
+            if index == 0 {
+                path.move(to: CGPoint(x: x, y: y))
+            } else {
+                path.addLine(to: CGPoint(x: x, y: y))
+            }
+        }
+        return path
     }
 }
