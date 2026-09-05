@@ -129,54 +129,44 @@ struct ContentView: View {
                 VStack(spacing: compact ? 7 : 9) {
                     connectionStrip
 
-                    HStack(spacing: 10) {
-                        heroMetric(
+                    // Primary ride telemetry: the three values the rider
+                    // needs to read at a glance while pedalling.
+                    HStack(spacing: 8) {
+                        telemetryHero(
                             "POWER",
                             "\(trainer.power3sW)",
                             "W",
-                            powerSubtitle,
                             powerZoneColor
                         )
 
-                        heroMetric(
+                        telemetryHero(
                             "HEART RATE",
                             trainer.heartRateBPM > 0
                                 ? "\(trainer.heartRateBPM)"
                                 : "—",
-                            trainer.heartRateBPM > 0
-                                ? "bpm"
-                                : "",
-                            hrSubtitle,
+                            trainer.heartRateBPM > 0 ? "bpm" : "",
                             hrZoneColor
                         )
+
+                        telemetryHero(
+                            "CADENCE",
+                            String(format: "%.0f", trainer.cadenceRPM),
+                            "rpm",
+                            .primary
+                        )
                     }
-                    .frame(height: compact ? 116 : 132)
+                    .frame(height: compact ? 104 : 118)
 
                     HStack(spacing: 7) {
                         dashMetric(
                             "GRADE",
-                            String(
-                                format: "%.1f",
-                                ride.currentGradePercent
-                            ),
+                            String(format: "%.1f", ride.currentGradePercent),
                             "%"
                         )
 
                         dashMetric(
-                            "CADENCE",
-                            String(
-                                format: "%.0f",
-                                trainer.cadenceRPM
-                            ),
-                            "rpm"
-                        )
-
-                        dashMetric(
                             "SPEED",
-                            String(
-                                format: "%.1f",
-                                ride.virtualSpeedKPH
-                            ),
+                            String(format: "%.1f", ride.virtualSpeedKPH),
                             "km/h"
                         )
 
@@ -188,7 +178,7 @@ struct ContentView: View {
                             ""
                         )
                     }
-                    .frame(height: compact ? 60 : 66)
+                    .frame(height: compact ? 58 : 64)
 
                     VStack(spacing: 5) {
                         if let route = ride.route {
@@ -199,17 +189,12 @@ struct ContentView: View {
                             .frame(maxHeight: .infinity)
 
                             HStack {
-                                Text(
-                                    ride.routeName ?? "GPX"
-                                )
-                                .lineLimit(1)
+                                Text(ride.routeName ?? "GPX")
+                                    .lineLimit(1)
 
                                 Spacer()
 
-                                VStack(
-                                    alignment: .trailing,
-                                    spacing: 1
-                                ) {
+                                VStack(alignment: .trailing, spacing: 1) {
                                     Text(
                                         String(
                                             format: "%.1f / %.1f km",
@@ -219,34 +204,21 @@ struct ContentView: View {
                                     )
                                     .monospacedDigit()
 
-                                    Text(
-                                        "ETA " + ride.etaText
-                                    )
-                                    .monospacedDigit()
+                                    Text("ETA " + ride.etaText)
+                                        .monospacedDigit()
                                 }
                             }
-                            .font(
-                                .caption.weight(.semibold)
-                            )
+                            .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
 
                         } else {
                             Spacer(minLength: 0)
-
-                            Image(
-                                systemName: "mountain.2.fill"
-                            )
-                            .font(.title2)
-                            .foregroundStyle(.secondary)
-
-                            Text(
-                                "Choose a GPX route in Setup"
-                            )
-                            .font(
-                                .subheadline.weight(.semibold)
-                            )
-                            .foregroundStyle(.secondary)
-
+                            Image(systemName: "mountain.2.fill")
+                                .font(.title2)
+                                .foregroundStyle(.secondary)
+                            Text("Choose a GPX route in Setup")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.secondary)
                             Spacer(minLength: 0)
                         }
                     }
@@ -258,9 +230,7 @@ struct ContentView: View {
                     )
                     .background(
                         .thinMaterial,
-                        in: RoundedRectangle(
-                            cornerRadius: 20
-                        )
+                        in: RoundedRectangle(cornerRadius: 20)
                     )
 
                     if drivetrainMode == "COG" {
@@ -280,8 +250,7 @@ struct ContentView: View {
                                     ride.frontIndex == 0,
                                 plusDisabled:
                                     ride.frontChainrings.count < 2 ||
-                                    ride.frontIndex >=
-                                    ride.frontChainrings.count - 1
+                                    ride.frontIndex >= ride.frontChainrings.count - 1
                             )
 
                             dashboardShifter(
@@ -294,55 +263,30 @@ struct ContentView: View {
                                     ride.shiftRearLarger()
                                     syncNativeGear()
                                 },
-                                minusDisabled:
-                                    ride.rearIndex == 0,
-                                plusDisabled:
-                                    ride.rearIndex >=
-                                    ride.cassette.count - 1
+                                minusDisabled: ride.rearIndex == 0,
+                                plusDisabled: ride.rearIndex >= ride.cassette.count - 1
                             )
                         }
-                        .frame(
-                            height: compact ? 70 : 78
-                        )
-
+                        .frame(height: compact ? 70 : 78)
                     } else {
                         HStack {
-                            Image(
-                                systemName: "bicycle"
-                            )
-
-                            VStack(
-                                alignment: .leading,
-                                spacing: 2
-                            ) {
-                                Text(
-                                    "REAL DRIVETRAIN"
-                                )
-                                .font(.caption.bold())
-
-                                Text(
-                                    "Use the bike's physical shifters"
-                                )
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
+                            Image(systemName: "bicycle")
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("REAL DRIVETRAIN")
+                                    .font(.caption.bold())
+                                Text("Use the bike's physical shifters")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
                             }
-
                             Spacer()
-
                             Text("1.00×")
-                                .font(
-                                    .headline.monospacedDigit()
-                                )
+                                .font(.headline.monospacedDigit())
                         }
                         .padding(.horizontal, 14)
-                        .frame(
-                            height: compact ? 58 : 64
-                        )
+                        .frame(height: compact ? 58 : 64)
                         .background(
                             .thinMaterial,
-                            in: RoundedRectangle(
-                                cornerRadius: 18
-                            )
+                            in: RoundedRectangle(cornerRadius: 18)
                         )
                     }
 
@@ -356,39 +300,25 @@ struct ContentView: View {
                             }
                         } label: {
                             Label(
-                                ride.isRiding
-                                    ? "Pause"
-                                    : "Start",
-                                systemImage:
-                                    ride.isRiding
-                                    ? "pause.fill"
-                                    : "play.fill"
+                                ride.isRiding ? "Pause" : "Start",
+                                systemImage: ride.isRiding ? "pause.fill" : "play.fill"
                             )
                             .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.large)
-                        .disabled(
-                            ride.route == nil ||
-                            !trainer.controlReady
-                        )
+                        .disabled(ride.route == nil || !trainer.controlReady)
 
                         Button {
                             ride.resetSession()
                             lastSentGrade = nil
                         } label: {
-                            Label(
-                                "Reset",
-                                systemImage:
-                                    "arrow.counterclockwise"
-                            )
-                            .frame(maxWidth: .infinity)
+                            Label("Reset", systemImage: "arrow.counterclockwise")
+                                .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.large)
-                        .disabled(
-                            ride.route == nil
-                        )
+                        .disabled(ride.route == nil)
                     }
                 }
                 .padding(.horizontal, 12)
@@ -468,135 +398,112 @@ struct ContentView: View {
 
     private var climb3DPage: some View {
         NavigationStack {
-            ZStack {
+            Group {
                 if climb3D.hasMesh, let route = ride.route {
-                    RideClimbPRO3DView(
-                        sceneController: climb3D.sceneController,
-                        distanceM: ride.isRiding ? ride.distanceM : previewDistanceM
-                    )
-                    .ignoresSafeArea(edges: .top)
+                    let shownDistance = ride.isRiding ? ride.distanceM : previewDistanceM
 
-                    VStack {
-                        VStack(spacing: 8) {
-                            HStack(spacing: 8) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(ride.routeName ?? "GPX")
-                                        .font(.caption.weight(.semibold))
-                                        .lineLimit(1)
+                    VStack(spacing: 0) {
+                        // Telemetry is outside the SceneKit viewport so it can
+                        // never cover the rider marker or the road.
+                        HStack(spacing: 0) {
+                            compact3DMetric("W", "\(trainer.power3sW)")
+                            compact3DMetric(
+                                "HR",
+                                trainer.heartRateBPM > 0
+                                    ? "\(trainer.heartRateBPM)"
+                                    : "—"
+                            )
+                            compact3DMetric(
+                                "RPM",
+                                String(format: "%.0f", trainer.cadenceRPM)
+                            )
+                            compact3DMetric(
+                                "GRADE",
+                                String(format: "%.1f%%", route.grade(at: shownDistance))
+                            )
+                            compact3DMetric(
+                                "SPEED",
+                                String(format: "%.1f", ride.virtualSpeedKPH)
+                            )
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .background(.regularMaterial)
 
-                                    Text(
-                                        String(
-                                            format: "%.1f / %.1f km",
-                                            (ride.isRiding ? ride.distanceM : previewDistanceM) / 1000,
-                                            route.totalDistanceM / 1000
-                                        )
-                                    )
-                                    .font(.caption2)
-                                    .monospacedDigit()
-                                }
+                        ZStack(alignment: .topLeading) {
+                            RideClimbPRO3DView(
+                                sceneController: climb3D.sceneController,
+                                distanceM: shownDistance
+                            )
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                                Spacer()
-
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(ride.routeName ?? "GPX")
+                                    .font(.caption.weight(.semibold))
+                                    .lineLimit(1)
                                 Text(
                                     String(
-                                        format: "%.1f%%",
-                                        route.grade(at: ride.isRiding ? ride.distanceM : previewDistanceM)
+                                        format: "%.1f / %.1f km • %.0f m",
+                                        shownDistance / 1000,
+                                        route.totalDistanceM / 1000,
+                                        route.elevation(at: shownDistance)
                                     )
                                 )
-                                .font(.title2.bold())
+                                .font(.caption2)
                                 .monospacedDigit()
                             }
-
-                            HStack(spacing: 10) {
-                                Label(
-                                    "\(trainer.power3sW) W",
-                                    systemImage: "bolt.fill"
-                                )
-                                .monospacedDigit()
-
-                                Spacer()
-
-                                Label(
-                                    trainer.heartRateBPM > 0
-                                        ? "\(trainer.heartRateBPM) bpm"
-                                        : "— bpm",
-                                    systemImage: "heart.fill"
-                                )
-                                .monospacedDigit()
-
-                                Spacer()
-
-                                Label(
-                                    String(
-                                        format: "%.1f km/h",
-                                        ride.virtualSpeedKPH
-                                    ),
-                                    systemImage: "speedometer"
-                                )
-                                .monospacedDigit()
-                            }
-                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 6)
+                            .background(.thinMaterial, in: Capsule())
+                            .padding(8)
                         }
-                        .padding(10)
-                        .background(.ultraThinMaterial)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                        .padding()
+                        .clipped()
 
-                        Spacer()
-
-                        VStack(spacing: 4) {
+                        VStack(spacing: 5) {
                             Slider(
                                 value: $previewDistanceM,
                                 in: 0...max(1, route.totalDistanceM)
                             )
                             .disabled(ride.isRiding)
 
-                            HStack {
-                                Text("Start")
-                                Spacer()
-                                Text(ride.isRiding ? "Live" : String(format: "%.1f km", previewDistanceM / 1000))
-                                    .monospacedDigit()
-                                Spacer()
-                                Text("Finish")
-                            }
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        }
-                        .padding(.horizontal)
-
-                        HStack {
-                            Text(
-                                String(
-                                    format: "%.0f m",
-                                    route.elevation(at: ride.isRiding ? ride.distanceM : previewDistanceM)
+                            HStack(spacing: 12) {
+                                Text(
+                                    ride.isRiding
+                                        ? "Live"
+                                        : String(format: "%.1f km", previewDistanceM / 1000)
                                 )
-                            )
-                            .monospacedDigit()
+                                .monospacedDigit()
+                                .frame(minWidth: 58, alignment: .leading)
 
-                            Spacer()
+                                Spacer()
 
-                            Button("Overview") {
-                                climb3D.showOverview()
+                                Button {
+                                    climb3D.showOverview()
+                                } label: {
+                                    Label("Overview", systemImage: "mountain.2")
+                                }
+                                .buttonStyle(.bordered)
+
+                                Button {
+                                    climb3D.resetCamera()
+                                } label: {
+                                    Label("Follow", systemImage: "location.fill")
+                                }
+                                .buttonStyle(.borderedProminent)
                             }
-                            .buttonStyle(.bordered)
-
-                            Button("Follow") {
-                                climb3D.resetCamera()
-                            }
-                            .buttonStyle(.borderedProminent)
+                            .font(.caption.weight(.semibold))
                         }
-                        .font(.caption.weight(.semibold))
-                        .padding(10)
-                        .background(.ultraThinMaterial)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                        .padding()
+                        .padding(.horizontal, 10)
+                        .padding(.top, 6)
+                        .padding(.bottom, 8)
+                        .background(.regularMaterial)
                     }
                 } else {
                     ContentUnavailableView(
                         "No 3D route",
                         systemImage: "mountain.2",
                         description: Text(
-                            "Import the GPX from the Ride tab. The same RideClimbPRO route drives both the trainer and the 3D view."
+                            "Import a planned GPX route in Setup. The same route drives both RideClimbPRO and the 3D view."
                         )
                     )
                 }
@@ -605,6 +512,7 @@ struct ContentView: View {
             .navigationBarTitleDisplayMode(.inline)
         }
     }
+
 
     private var setupPage: some View {
         NavigationStack {
@@ -1147,6 +1055,61 @@ struct ContentView: View {
             }
             .buttonStyle(.bordered)
             .disabled(plusDisabled)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func telemetryHero(
+        _ title: String,
+        _ value: String,
+        _ unit: String,
+        _ color: Color
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+
+            Spacer(minLength: 0)
+
+            HStack(alignment: .firstTextBaseline, spacing: 2) {
+                Text(value)
+                    .font(.system(size: 34, weight: .bold, design: .rounded))
+                    .minimumScaleFactor(0.48)
+                    .lineLimit(1)
+                if !unit.isEmpty {
+                    Text(unit)
+                        .font(.caption.bold())
+                }
+            }
+            .foregroundStyle(color)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .background(
+            color.opacity(0.09),
+            in: RoundedRectangle(cornerRadius: 18)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18)
+                .stroke(color.opacity(0.22))
+        )
+    }
+
+    private func compact3DMetric(
+        _ title: String,
+        _ value: String
+    ) -> some View {
+        VStack(spacing: 1) {
+            Text(title)
+                .font(.system(size: 8, weight: .bold))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.system(size: 15, weight: .bold, design: .rounded))
+                .monospacedDigit()
+                .minimumScaleFactor(0.60)
+                .lineLimit(1)
         }
         .frame(maxWidth: .infinity)
     }
