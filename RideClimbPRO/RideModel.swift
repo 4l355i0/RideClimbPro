@@ -1052,11 +1052,11 @@ final class RideModel: ObservableObject {
         let speedKPH: Double
 
         if cadenceRPM > 0.1 {
-            // Build-25 style route speed: cadence + mapped native virtual ratio.
+            // While pedalling, keep the validated cadence + mapped native virtual ratio model.
             speedKPH = self.speedKPH(from: cadenceRPM)
-        } else if gradeBeforeAdvance < 0 && trainerSpeedKPH > 0.1 {
-            // Coasting only: when pedalling stops on a descent, retain the speed
-            // physically reported by the trainer instead of forcing virtual speed to 0.
+        } else if trainerSpeedKPH > 0.1 {
+            // When pedalling stops, always use the trainer-reported speed.
+            // This preserves the trainer's own flywheel/inertia behaviour on flats, climbs and descents.
             speedKPH = trainerSpeedKPH
         } else {
             speedKPH = 0
