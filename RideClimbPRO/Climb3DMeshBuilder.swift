@@ -2,9 +2,9 @@ import Foundation
 
 struct Climb3DMeshBuilder {
     let stlHalfWidthM: Double = 5.0
-    let visualHalfWidthM: Double = 3.0
+    let visualHalfWidthM: Double = 2.2
     let stlJoinLimitMultiplier: Double = 2.0
-    let visualJoinLimitMultiplier: Double = 1.30
+    let visualJoinLimitMultiplier: Double = 1.08
 
     let verticalExaggeration: Double = 5.0
     let baseHeightM: Double = 8.0
@@ -262,8 +262,13 @@ struct Climb3DMeshBuilder {
             let joint = incoming + relative / 2
             let cosHalf = cos(relative / 2)
 
+            // Hairpin-safe join. A long miter can cross the opposite road edge
+            // on a very tight bend, visually folding the ribbon over itself.
+            // Use a normal miter for gentle bends and a bevel-like capped join
+            // for sharp direction changes.
+            let turnDegrees = abs(relative) * 180.0 / .pi
             var radius = halfWidth
-            if abs(cosHalf) > 0.0001 {
+            if turnDegrees < 70.0, abs(cosHalf) > 0.0001 {
                 radius = halfWidth / cosHalf
             }
 
@@ -308,3 +313,4 @@ struct Climb3DMeshBuilder {
         return sqrt(dx*dx + dz*dz)
     }
 }
+
