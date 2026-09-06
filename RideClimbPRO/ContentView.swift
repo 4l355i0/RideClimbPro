@@ -135,27 +135,27 @@ struct ContentView: View {
 
                 Group {
                     if iPadLandscape {
-                        // iPad landscape gets a real two-column dashboard so the
-                        // bottom controls never fall behind the tab bar.
+                        // iPad landscape only. iPhone / iPad portrait stay unchanged.
+                        // Priority: telemetry + large ride controls, with a more compact profile.
                         VStack(spacing: 10) {
                             connectionStrip
 
-                            primaryTelemetryRow(height: 126)
+                            primaryTelemetryRow(height: 138)
 
                             HStack(alignment: .top, spacing: 12) {
+                                VStack(spacing: 12) {
+                                    secondaryMetricsRow(height: 72)
+                                    iPadDrivetrainControl
+                                    iPadRideActionButtons
+                                    Spacer(minLength: 0)
+                                }
+                                .frame(width: min(430, geo.size.width * 0.42))
+
                                 routeProfileCard(
                                     minHeight: 0,
                                     fixedHeight: nil
                                 )
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                                VStack(spacing: 10) {
-                                    secondaryMetricsRow(height: 62)
-                                    drivetrainControlRow(height: 76)
-                                    rideActionButtons
-                                    Spacer(minLength: 0)
-                                }
-                                .frame(width: min(340, geo.size.width * 0.34))
                             }
                             .frame(maxHeight: .infinity)
                         }
@@ -397,6 +397,146 @@ struct ContentView: View {
         }
     }
 
+
+
+    @ViewBuilder
+    private var iPadDrivetrainControl: some View {
+        if drivetrainMode == "COG" {
+            HStack(spacing: 14) {
+                iPadShifter(
+                    "CHAINRING",
+                    value: "\(ride.frontChainring)T",
+                    minus: {
+                        ride.shiftFrontSmaller()
+                        syncNativeGear()
+                    },
+                    plus: {
+                        ride.shiftFrontLarger()
+                        syncNativeGear()
+                    },
+                    minusDisabled:
+                        ride.frontChainrings.count < 2 ||
+                        ride.frontIndex == 0,
+                    plusDisabled:
+                        ride.frontChainrings.count < 2 ||
+                        ride.frontIndex >= ride.frontChainrings.count - 1
+                )
+
+                iPadShifter(
+                    "SPROCKET",
+                    value: "\(ride.rearSprocket)T",
+                    minus: {
+                        ride.shiftRearSmaller()
+                        syncNativeGear()
+                    },
+                    plus: {
+                        ride.shiftRearLarger()
+                        syncNativeGear()
+                    },
+                    minusDisabled: ride.rearIndex == 0,
+                    plusDisabled: ride.rearIndex >= ride.cassette.count - 1
+                )
+            }
+            .frame(height: 126)
+        } else {
+            HStack(spacing: 12) {
+                Image(systemName: "bicycle")
+                    .font(.title2)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("REAL DRIVETRAIN")
+                        .font(.headline.bold())
+                    Text("Use the bike's physical shifters")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text("1.00×")
+                    .font(.title3.bold().monospacedDigit())
+            }
+            .padding(.horizontal, 18)
+            .frame(height: 94)
+            .background(
+                .thinMaterial,
+                in: RoundedRectangle(cornerRadius: 20)
+            )
+        }
+    }
+
+    private func iPadShifter(
+        _ title: String,
+        value: String,
+        minus: @escaping () -> Void,
+        plus: @escaping () -> Void,
+        minusDisabled: Bool,
+        plusDisabled: Bool
+    ) -> some View {
+        VStack(spacing: 7) {
+            HStack {
+                Text(title)
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text(value)
+                    .font(.headline.monospacedDigit())
+            }
+
+            HStack(spacing: 10) {
+                Button(action: minus) {
+                    Image(systemName: "minus")
+                        .font(.title2.bold())
+                        .frame(maxWidth: .infinity, minHeight: 54)
+                }
+                .buttonStyle(.bordered)
+                .disabled(minusDisabled)
+
+                Button(action: plus) {
+                    Image(systemName: "plus")
+                        .font(.title2.bold())
+                        .frame(maxWidth: .infinity, minHeight: 54)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(plusDisabled)
+            }
+        }
+        .padding(12)
+        .background(
+            .thinMaterial,
+            in: RoundedRectangle(cornerRadius: 20)
+        )
+    }
+
+    private var iPadRideActionButtons: some View {
+        VStack(spacing: 10) {
+            Button {
+                if ride.isRiding {
+                    ride.pauseRide()
+                } else {
+                    syncNativeGear()
+                    ride.startRide()
+                }
+            } label: {
+                Label(
+                    ride.isRiding ? "Pause" : "Start",
+                    systemImage: ride.isRiding ? "pause.fill" : "play.fill"
+                )
+                .font(.title3.bold())
+                .frame(maxWidth: .infinity, minHeight: 66)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(ride.route == nil || !trainer.controlReady)
+
+            Button {
+                ride.resetSession()
+                lastSentGrade = nil
+            } label: {
+                Label("Reset", systemImage: "arrow.counterclockwise")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity, minHeight: 46)
+            }
+            .buttonStyle(.bordered)
+            .disabled(ride.route == nil)
+        }
+    }
 
     private var climb2DPage: some View {
         NavigationStack {
